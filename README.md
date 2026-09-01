@@ -89,7 +89,7 @@ BOT_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ## Start the Bot
 
 ```sh
-docker compose pull signal-bot signal-api
+docker compose pull signal-bot
 docker compose up -d
 ```
 
