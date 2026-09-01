@@ -1,15 +1,18 @@
 # Signal Media Bot
 
-Download media links in Signal DMs and groups, then send the media back as Signal attachments.
+Download media from links in Signal DMs and groups, then send the media back as Signal attachments.
 
 > [!CAUTION]
 > **Privacy & Cloud Hosting Risks**:
 >
 > - **End-to-End Encryption & Group Decryption**: As an active member of a group or linked device, the bot receives and decrypts all messages in the conversation in memory (RAM).
 > - **VPS & Cloud Provider Access**: Running this on a commercial VPS or cloud provider grants the host hypervisor-level access. The provider could theoretically inspect decrypted runtime memory, container logs, and stored cryptographic keys in the `signal_cli_data` volume.
-> - **Recommendations**:
->   - **Use a Dedicated Number**: Use a dedicated bot phone number instead of linking your personal primary Signal account. Only add this bot as a contact or add it to a group chat where you and your friends never send private messages.
->   - **Self-Host at Home**: For absolute privacy, host on local hardware (e.g., Raspberry Pi or home server) where you own the physical machine. Since all traffic is outbound, no router ports need to be exposed.
+<!---->
+> [!TIP]
+> **Recommendations**:
+>
+> - **Use a Dedicated Number**: Use a dedicated bot phone number instead of linking your personal primary Signal account. Only add this bot as a contact or add it to a group chat where you and your friends never send private messages.
+> - **Self-Host at Home**: For absolute privacy, host on local hardware (e.g., Raspberry Pi or home server) where you own the physical machine. Since all traffic is outbound, no router ports need to be exposed.
 
 ## Setup
 
