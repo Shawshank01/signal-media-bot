@@ -89,8 +89,7 @@ BOT_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ## Start the Bot
 
 ```sh
-docker compose pull signal-bot
-docker compose up -d
+docker compose up -d --pull always signal-bot
 ```
 
 Check the bot:

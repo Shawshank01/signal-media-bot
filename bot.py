@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -245,9 +246,16 @@ class SignalClient:
         payload: dict[str, Any] = {"number": self.config.bot_phone_number, "message": message}
         payload["recipients"] = [destination.group_id or destination.sender]
         if media:
-            payload["attachments"] = [str(item.path) for item in media]
+            payload["base64_attachments"] = await asyncio.gather(*(encode_attachment(item) for item in media))
         response = await self.client.post(f"{self.config.signal_api_url.rstrip('/')}/v2/send", json=payload)
-        response.raise_for_status()
+        if response.is_error:
+            log.error("Signal API rejected send (%s): %s", response.status_code, response.text[:1000])
+            response.raise_for_status()
+
+
+async def encode_attachment(media: DownloadedMedia) -> str:
+    encoded = await asyncio.to_thread(lambda: base64.b64encode(media.path.read_bytes()).decode("ascii"))
+    return f"data:{media.content_type};filename={media.path.name};base64,{encoded}"
 
 
 async def process_message(message: IncomingMessage, config: Settings, client: httpx.AsyncClient) -> None:
