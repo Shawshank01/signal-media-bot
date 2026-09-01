@@ -18,13 +18,9 @@ Edit `.env`:
 ```dotenv
 BOT_PHONE_NUMBER=+
 BOT_UUID=
-SIGNAL_MEDIA_IMAGE=michifumi/signal-media-bot:latest
-BOT_MENTION_NAMES=bot,signalbot
 ```
 
 `BOT_PHONE_NUMBER` is required. Setting `BOT_UUID` is optional but strongly recommended ([see how to get it](#obtaining-the-bots-uuid-recommended)). Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
-
-The host ports are bound to `127.0.0.1` and are not publicly accessible. The containers communicate over Docker's internal network.
 
 ## Signal Account
 
@@ -38,13 +34,13 @@ Start the Signal API:
 docker compose up -d signal-api
 ```
 
-View the available API endpoints:
+Check that the Signal API is running:
 
 ```sh
-curl -s http://127.0.0.1:18080/openapi.json | less
+curl -s http://127.0.0.1:18080/v1/health
 ```
 
-Use the registration endpoints shown in that output to submit the captcha, request the SMS code, and verify the code.
+Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The gateway does not provide FastAPI's `/openapi.json` endpoint.
 
 ### Link Existing Account
 
