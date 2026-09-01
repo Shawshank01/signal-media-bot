@@ -67,15 +67,20 @@ Signal uses UUIDs (ACI) to identify accounts. Setting `BOT_UUID` in `.env` is **
 - **Native Group Mentions**: When group members select the bot from Signal's native `@` popup list, Signal generates a structured mention payload containing only the bot's UUID.
 - **Self-Message Filtering**: Prevents loopback processing by accurately filtering out messages sent by the bot or its linked primary device.
 
-Once `signal-api` is registered or linked, retrieve your account's UUID by running:
+Confirm that the linked account is registered:
 
 ```sh
 curl -s http://127.0.0.1:18080/v1/accounts
 ```
 
-*(Alternatively: `curl -s http://127.0.0.1:18080/v1/identities/$BOT_PHONE_NUMBER`)*
+The response should contain the bot's phone number. To query identities, first load the number from `.env` because values in `.env` are not automatically shell variables:
 
-Copy the `uuid` field from the output and update your `.env` file:
+```sh
+BOT_PHONE_NUMBER=$(sed -n 's/^BOT_PHONE_NUMBER=//p' .env)
+curl -s "http://127.0.0.1:18080/v1/identities/${BOT_PHONE_NUMBER}"
+```
+
+Only set `BOT_UUID` if a gateway response or incoming event explicitly provides the bot's UUID:
 
 ```dotenv
 BOT_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
