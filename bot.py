@@ -7,10 +7,11 @@ import logging
 import re
 import shutil
 import tempfile
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -18,17 +19,23 @@ import yt_dlp
 from fastapi import FastAPI, HTTPException, Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
 log = logging.getLogger("signal-media-bot")
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
 X_STATUS_RE = re.compile(r"/(?:[^/]+/)?status/(\d+)", re.IGNORECASE)
+BSKY_HOSTS = {"bsky.app", "www.bsky.app", "fxbsky.app", "www.fxbsky.app"}
+BSKY_POST_RE = re.compile(r"/profile/([^/]+)/post/([^/?#]+)", re.IGNORECASE)
 GROUP_PREFIX = "group."
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", case_sensitive=False
+    )
 
     bot_phone_number: str
     bot_uuid: str | None = None
@@ -39,6 +46,7 @@ class Settings(BaseSettings):
     max_urls_per_message: int = 4
     download_timeout_seconds: int = 300
     fxtwitter_api_url: str = "https://api.fxtwitter.com"
+    fxbsky_api_url: str = "https://api.fxbsky.app"
     shared_media_dir: Path = Path("/tmp/signal_shared_media")
     user_agent: str = "signal-media-bot/1.0"
 
@@ -48,7 +56,9 @@ class Settings(BaseSettings):
 
     @property
     def prefixes(self) -> tuple[str, ...]:
-        return tuple(x.strip().lower() for x in self.trigger_prefixes.split(",") if x.strip())
+        return tuple(
+            x.strip().lower() for x in self.trigger_prefixes.split(",") if x.strip()
+        )
 
 
 settings = Settings()
@@ -98,7 +108,12 @@ def parse_message(payload: dict[str, Any]) -> IncomingMessage | None:
     if not envelope:
         return None
     data = envelope.get("dataMessage") or {}
-    sender = str(envelope.get("sourceNumber") or envelope.get("source") or envelope.get("sourceUuid") or "")
+    sender = str(
+        envelope.get("sourceNumber")
+        or envelope.get("source")
+        or envelope.get("sourceUuid")
+        or ""
+    )
     if not data.get("message") and not data.get("quote"):
         return None
     group = data.get("groupInfo") or {}
@@ -122,7 +137,18 @@ def extract_urls(text: str) -> list[str]:
 
 
 def is_x_url(url: str) -> bool:
-    return (urlparse(url).hostname or "").lower() in X_HOSTS and bool(X_STATUS_RE.search(urlparse(url).path))
+    return (urlparse(url).hostname or "").lower() in X_HOSTS and bool(
+        X_STATUS_RE.search(urlparse(url).path)
+    )
+
+
+def is_bsky_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return bool(
+        parsed.hostname
+        and parsed.hostname.lower() in BSKY_HOSTS
+        and BSKY_POST_RE.search(parsed.path)
+    )
 
 
 def signal_recipient(message: IncomingMessage) -> str:
@@ -130,13 +156,17 @@ def signal_recipient(message: IncomingMessage) -> str:
         return message.sender
     if message.group_id.startswith(GROUP_PREFIX):
         return message.group_id
-    encoded_group_id = base64.b64encode(message.group_id.encode("ascii")).decode("ascii")
+    encoded_group_id = base64.b64encode(message.group_id.encode("ascii")).decode(
+        "ascii"
+    )
     return f"{GROUP_PREFIX}{encoded_group_id}"
 
 
 def group_triggered(message: IncomingMessage, settings: Settings) -> bool:
     lowered = message.text.lower().strip()
-    prefix = any(lowered == item or lowered.startswith(item + " ") for item in settings.prefixes)
+    prefix = any(
+        lowered == item or lowered.startswith(item + " ") for item in settings.prefixes
+    )
     native_mention = bool(settings.bot_uuid) and any(
         str(item.get("uuid") or "") == settings.bot_uuid for item in message.mentions
     )
@@ -176,39 +206,112 @@ class FxTwitterClient:
             video = max(videos, key=lambda item: int(item.get("bitrate") or 0))
             media_url = video.get("url")
             if media_url:
-                return [await stream_to_file(self.client, media_url, destination / "video.mp4", self.config)]
+                return [
+                    await stream_to_file(
+                        self.client, media_url, destination / "video.mp4", self.config
+                    )
+                ]
         if photos:
             output: list[DownloadedMedia] = []
             for index, photo in enumerate(photos):
                 media_url = photo.get("url")
                 if media_url:
-                    output.append(await stream_to_file(self.client, media_url, destination / f"image-{index}.jpg", self.config))
+                    output.append(
+                        await stream_to_file(
+                            self.client,
+                            media_url,
+                            destination / f"image-{index}.jpg",
+                            self.config,
+                        )
+                    )
             if output:
                 return output
         raise DownloadError("No downloadable media was found in that post.")
 
 
-async def stream_to_file(client: httpx.AsyncClient, url: str, path: Path, config: Settings) -> DownloadedMedia:
+class FxBlueskyClient:
+    def __init__(self, client: httpx.AsyncClient, config: Settings):
+        self.client = client
+        self.config = config
+
+    async def download(self, url: str, destination: Path) -> list[DownloadedMedia]:
+        match = BSKY_POST_RE.search(urlparse(url).path)
+        if not match:
+            raise DownloadError("That Bluesky link is not a post.")
+        handle, rkey = match.groups()
+        api_url = f"{self.config.fxbsky_api_url.rstrip('/')}/2/status/{handle}/{rkey}"
+        response = await self.client.get(api_url)
+        response.raise_for_status()
+        data = response.json().get("status", {})
+        media = data.get("media") or {}
+        videos = media.get("videos") or []
+        photos = media.get("photos") or []
+        if videos:
+            video = videos[0]
+            formats = [
+                item
+                for item in video.get("formats", [])
+                if item.get("container") == "mp4"
+            ]
+            selected = max(
+                formats or [video], key=lambda item: int(item.get("bitrate") or 0)
+            )
+            media_url = selected.get("url") or video.get("url")
+            if media_url:
+                return [
+                    await stream_to_file(
+                        self.client, media_url, destination / "video.mp4", self.config
+                    )
+                ]
+        if photos:
+            output: list[DownloadedMedia] = []
+            for index, photo in enumerate(photos):
+                media_url = photo.get("url")
+                if media_url:
+                    output.append(
+                        await stream_to_file(
+                            self.client,
+                            media_url,
+                            destination / f"image-{index}.jpg",
+                            self.config,
+                        )
+                    )
+            if output:
+                return output
+        raise DownloadError("No downloadable media was found in that post.")
+
+
+async def stream_to_file(
+    client: httpx.AsyncClient, url: str, path: Path, config: Settings
+) -> DownloadedMedia:
     try:
         async with client.stream("GET", url, follow_redirects=True) as response:
             response.raise_for_status()
             length = int(response.headers.get("content-length") or 0)
             if length > config.max_file_size:
-                raise DownloadError(f"The media is larger than {config.max_file_size_mb} MB.")
+                raise DownloadError(
+                    f"The media is larger than {config.max_file_size_mb} MB."
+                )
             total = 0
             with path.open("wb") as output:
                 async for chunk in response.aiter_bytes(1024 * 256):
                     total += len(chunk)
                     if total > config.max_file_size:
-                        raise DownloadError(f"The media is larger than {config.max_file_size_mb} MB.")
+                        raise DownloadError(
+                            f"The media is larger than {config.max_file_size_mb} MB."
+                        )
                     output.write(chunk)
-        content_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0]
+        content_type = response.headers.get(
+            "content-type", "application/octet-stream"
+        ).split(";", 1)[0]
         return DownloadedMedia(path, content_type)
     except httpx.HTTPError as exc:
         raise DownloadError("The media could not be downloaded.") from exc
 
 
-async def download_with_ytdlp(url: str, destination: Path, config: Settings) -> list[DownloadedMedia]:
+async def download_with_ytdlp(
+    url: str, destination: Path, config: Settings
+) -> list[DownloadedMedia]:
     def run() -> list[Path]:
         options = {
             "outtmpl": str(destination / "%(id)s.%(ext)s"),
@@ -225,19 +328,33 @@ async def download_with_ytdlp(url: str, destination: Path, config: Settings) -> 
             with yt_dlp.YoutubeDL(options) as downloader:
                 downloader.download([url])
         except (yt_dlp.utils.DownloadError, OSError) as exc:
-            raise DownloadError("The link is private, unavailable, or could not be extracted.") from exc
+            raise DownloadError(
+                "The link is private, unavailable, or could not be extracted."
+            ) from exc
         return [path for path in destination.iterdir() if path.is_file()]
 
     try:
-        paths = await asyncio.wait_for(asyncio.to_thread(run), config.download_timeout_seconds)
+        paths = await asyncio.wait_for(
+            asyncio.to_thread(run), config.download_timeout_seconds
+        )
     except asyncio.TimeoutError as exc:
         raise DownloadError("The download timed out.") from exc
     if not paths:
         raise DownloadError("No downloadable media was found at that link.")
     for path in paths:
         if path.stat().st_size > config.max_file_size:
-            raise DownloadError(f"The media is larger than {config.max_file_size_mb} MB.")
-    return [DownloadedMedia(path, "video/mp4" if path.suffix.lower() == ".mp4" else "application/octet-stream") for path in paths]
+            raise DownloadError(
+                f"The media is larger than {config.max_file_size_mb} MB."
+            )
+    return [
+        DownloadedMedia(
+            path,
+            "video/mp4"
+            if path.suffix.lower() == ".mp4"
+            else "application/octet-stream",
+        )
+        for path in paths
+    ]
 
 
 class SignalClient:
@@ -245,38 +362,66 @@ class SignalClient:
         self.client = client
         self.config = config
 
-    async def send(self, message: str, destination: IncomingMessage, media: list[DownloadedMedia] | None = None) -> None:
-        payload: dict[str, Any] = {"number": self.config.bot_phone_number, "message": message}
+    async def send(
+        self,
+        message: str,
+        destination: IncomingMessage,
+        media: list[DownloadedMedia] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "number": self.config.bot_phone_number,
+            "message": message,
+        }
         payload["recipients"] = [signal_recipient(destination)]
         if media:
-            payload["base64_attachments"] = await asyncio.gather(*(encode_attachment(item) for item in media))
-        response = await self.client.post(f"{self.config.signal_api_url.rstrip('/')}/v2/send", json=payload)
+            payload["base64_attachments"] = await asyncio.gather(
+                *(encode_attachment(item) for item in media)
+            )
+        response = await self.client.post(
+            f"{self.config.signal_api_url.rstrip('/')}/v2/send", json=payload
+        )
         if response.is_error:
-            log.error("Signal API rejected send (%s): %s", response.status_code, response.text[:1000])
+            log.error(
+                "Signal API rejected send (%s): %s",
+                response.status_code,
+                response.text[:1000],
+            )
             response.raise_for_status()
 
 
 async def encode_attachment(media: DownloadedMedia) -> str:
-    encoded = await asyncio.to_thread(lambda: base64.b64encode(media.path.read_bytes()).decode("ascii"))
+    encoded = await asyncio.to_thread(
+        lambda: base64.b64encode(media.path.read_bytes()).decode("ascii")
+    )
     return f"data:{media.content_type};filename={media.path.name};base64,{encoded}"
 
 
-async def process_message(message: IncomingMessage, config: Settings, client: httpx.AsyncClient) -> None:
+async def process_message(
+    message: IncomingMessage, config: Settings, client: httpx.AsyncClient
+) -> None:
     urls = message_urls(message, config)
     if not urls:
         return
     signal = SignalClient(client, config)
     fx = FxTwitterClient(client, config)
+    bsky = FxBlueskyClient(client, config)
     for url in urls:
-        workdir = Path(tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir))
+        workdir = Path(
+            tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir)
+        )
         try:
             await signal.send("Downloading media...", message)
-            media = await (fx.download(url, workdir) if is_x_url(url) else download_with_ytdlp(url, workdir, config))
+            if is_x_url(url):
+                media = await fx.download(url, workdir)
+            elif is_bsky_url(url):
+                media = await bsky.download(url, workdir)
+            else:
+                media = await download_with_ytdlp(url, workdir, config)
             await signal.send("", message, media)
         except DownloadError as exc:
             log.info("Download failed for %s: %s", url, exc)
             await send_error(signal, str(exc), message)
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx.HTTPError, OSError):
             log.exception("Processing failed for %s", url)
             await send_error(signal, "I could not send that media right now.", message)
         finally:
@@ -294,7 +439,9 @@ async def send_error(signal: SignalClient, text: str, message: IncomingMessage) 
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings.shared_media_dir.mkdir(parents=True, exist_ok=True)
     timeout = httpx.Timeout(settings.download_timeout_seconds, connect=15)
-    async with httpx.AsyncClient(timeout=timeout, headers={"User-Agent": settings.user_agent}) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout, headers={"User-Agent": settings.user_agent}
+    ) as client:
         app.state.http_client = client
         yield
 
@@ -318,5 +465,7 @@ async def webhook(request: Request) -> dict[str, str]:
     message = parse_message(payload)
     if not message or message.sender in {settings.bot_phone_number, settings.bot_uuid}:
         return {"status": "ignored"}
-    asyncio.create_task(process_message(message, settings, request.app.state.http_client))
+    asyncio.create_task(
+        process_message(message, settings, request.app.state.http_client)
+    )
     return {"status": "accepted"}

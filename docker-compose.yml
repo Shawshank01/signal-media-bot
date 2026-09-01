@@ -14,14 +14,14 @@ services:
       - signal_cli_data:/home/.local/share/signal-cli
       - shared_media:/tmp/signal_shared_media
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/v1/health >/dev/null || exit 1"]
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:8080/v1/health >/dev/null || exit 1" ]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 20s
 
   signal-bot:
-    image: "${SIGNAL_MEDIA_IMAGE:?Set SIGNAL_MEDIA_IMAGE in .env}"
+    image: michifumi/signal-media-bot:latest
     container_name: signal-bot
     restart: unless-stopped
     env_file:

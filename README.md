@@ -129,5 +129,5 @@ docker compose up -d signal-bot
 
 - **[signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)** – Dockerized REST/JSON-RPC API gateway for Signal messaging and webhook routing.
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** – Media extraction engine supporting YouTube, TikTok, Instagram, Reddit, and hundreds of other platforms.
-- **[FxTwitter / FixTweet](https://github.com/FixTweet/FxTwitter)** – API engine for Twitter/X media extraction and CDN stream resolution.
+- **[FxEmbed](https://github.com/FxEmbed/FxEmbed)** – API engine for Twitter/X media extraction and CDN stream resolution.
 - **[FFmpeg](https://ffmpeg.org/)** – Multimedia framework for audio/video stream multiplexing.
