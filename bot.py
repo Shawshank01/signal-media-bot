@@ -24,6 +24,7 @@ log = logging.getLogger("signal-media-bot")
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}
 X_STATUS_RE = re.compile(r"/(?:[^/]+/)?status/(\d+)", re.IGNORECASE)
+GROUP_PREFIX = "group."
 
 
 class Settings(BaseSettings):
@@ -127,6 +128,12 @@ def extract_urls(text: str) -> list[str]:
 
 def is_x_url(url: str) -> bool:
     return (urlparse(url).hostname or "").lower() in X_HOSTS and bool(X_STATUS_RE.search(urlparse(url).path))
+
+
+def signal_recipient(message: IncomingMessage) -> str:
+    if not message.group_id:
+        return message.sender
+    return message.group_id if message.group_id.startswith(GROUP_PREFIX) else f"{GROUP_PREFIX}{message.group_id}"
 
 
 def group_triggered(message: IncomingMessage, settings: Settings) -> bool:
@@ -244,7 +251,7 @@ class SignalClient:
 
     async def send(self, message: str, destination: IncomingMessage, media: list[DownloadedMedia] | None = None) -> None:
         payload: dict[str, Any] = {"number": self.config.bot_phone_number, "message": message}
-        payload["recipients"] = [destination.group_id or destination.sender]
+        payload["recipients"] = [signal_recipient(destination)]
         if media:
             payload["base64_attachments"] = await asyncio.gather(*(encode_attachment(item) for item in media))
         response = await self.client.post(f"{self.config.signal_api_url.rstrip('/')}/v2/send", json=payload)
@@ -272,12 +279,19 @@ async def process_message(message: IncomingMessage, config: Settings, client: ht
             await signal.send("", message, media)
         except DownloadError as exc:
             log.info("Download failed for %s: %s", url, exc)
-            await signal.send(str(exc), message)
+            await send_error(signal, str(exc), message)
         except (httpx.HTTPError, OSError) as exc:
             log.exception("Processing failed for %s", url)
-            await signal.send("I could not send that media right now.", message)
+            await send_error(signal, "I could not send that media right now.", message)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def send_error(signal: SignalClient, text: str, message: IncomingMessage) -> None:
+    try:
+        await signal.send(text, message)
+    except (httpx.HTTPError, OSError):
+        log.exception("Could not send error response")
 
 
 @asynccontextmanager
