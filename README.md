@@ -2,7 +2,16 @@
 
 Download media links in Signal DMs and groups, then send the media back as Signal attachments.
 
-## VPS Setup
+> [!CAUTION]
+> **Privacy & Cloud Hosting Risks**:
+>
+> - **End-to-End Encryption & Group Decryption**: As an active member of a group or linked device, the bot receives and decrypts all messages in the conversation in memory (RAM).
+> - **VPS & Cloud Provider Access**: Running this on a commercial VPS or cloud provider grants the host hypervisor-level access. The provider could theoretically inspect decrypted runtime memory, container logs, and stored cryptographic keys in the `signal_cli_data` volume.
+> - **Recommendations**:
+>   - **Use a Dedicated Number**: Use a dedicated bot phone number instead of linking your personal primary Signal account. Only add this bot as a contact or add it to a group chat where you and your friends never send private messages.
+>   - **Self-Host at Home**: For absolute privacy, host on local hardware (e.g., Raspberry Pi or home server) where you own the physical machine. Since all traffic is outbound, no router ports need to be exposed.
+
+## Setup
 
 Install Docker and Docker Compose, then download the two required files:
 
@@ -96,14 +105,18 @@ Check the bot:
 
 ```sh
 curl http://127.0.0.1:18000/health
-docker compose ps
-docker compose logs -f signal-api signal-bot
 ```
 
 Expected health response:
 
 ```json
 {"status":"ok"}
+```
+
+Check logs:
+
+```sh
+docker compose logs -f signal-api signal-bot
 ```
 
 ## Using the Bot
