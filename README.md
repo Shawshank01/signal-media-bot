@@ -34,12 +34,6 @@ Start the Signal API:
 docker compose up -d signal-api
 ```
 
-Check that the Signal API is running:
-
-```sh
-curl -s http://127.0.0.1:18080/v1/health
-```
-
 Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The gateway does not provide FastAPI's `/openapi.json` endpoint.
 
 ### Link Existing Account
@@ -53,10 +47,17 @@ docker compose up -d signal-api
 Request a pairing QR code on the VPS:
 
 ```sh
-curl -o pairing.html "http://127.0.0.1:18080/v1/qrcodelink?device_name=signal-media-bot"
+docker compose run --rm signal-bot sh -c \
+ 'curl -fsS "http://signal-api:8080/v1/qrcodelink/raw?device_name=signal-media-bot" | qrencode -t ANSIUTF8'
 ```
 
-Scan the QR code in Signal under **Settings > Linked devices > Link new device**. If the endpoint returns JSON or an image instead of HTML, follow the response format shown by the API.
+Scan the QR code shown in the terminal with Signal under **Settings > Linked devices > Link new device**. If the raw endpoint is unavailable, save the normal response and inspect it:
+
+```sh
+curl -fsS -o pairing.html "http://127.0.0.1:18080/v1/qrcodelink?device_name=signal-media-bot"
+file pairing.html
+head -c 500 pairing.html
+```
 
 ### Obtaining the Bot's UUID (Recommended)
 
