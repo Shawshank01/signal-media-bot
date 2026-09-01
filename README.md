@@ -8,7 +8,7 @@ Download media from links in Signal DMs and groups, then send the media back as 
 > - **End-to-End Encryption & Group Decryption**: As an active member of a group or linked device, the bot receives and decrypts all messages in the conversation in memory (RAM).
 > - **VPS & Cloud Provider Access**: Running this on a commercial VPS or cloud provider grants the host hypervisor-level access. The provider could theoretically inspect decrypted runtime memory, container logs, and stored cryptographic keys in the `signal_cli_data` volume.
 <!---->
-> [!TIP]
+> [!NOTE]
 > **Recommendations**:
 >
 > - **Use a Dedicated Number**: Use a dedicated bot phone number instead of linking your personal primary Signal account. Only add this bot as a contact or add it to a group chat where you and your friends never send private messages.
