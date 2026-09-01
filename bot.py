@@ -133,7 +133,10 @@ def is_x_url(url: str) -> bool:
 def signal_recipient(message: IncomingMessage) -> str:
     if not message.group_id:
         return message.sender
-    return message.group_id if message.group_id.startswith(GROUP_PREFIX) else f"{GROUP_PREFIX}{message.group_id}"
+    if message.group_id.startswith(GROUP_PREFIX):
+        return message.group_id
+    encoded_group_id = base64.b64encode(message.group_id.encode("ascii")).decode("ascii")
+    return f"{GROUP_PREFIX}{encoded_group_id}"
 
 
 def group_triggered(message: IncomingMessage, settings: Settings) -> bool:
