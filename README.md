@@ -48,10 +48,10 @@ Request a pairing QR code on the VPS:
 
 ```sh
 docker compose run --rm signal-bot sh -c \
- 'curl -fsS "http://signal-api:8080/v1/qrcodelink/raw?device_name=signal-media-bot" | qrencode -t ANSIUTF8'
+ 'curl -fsS "http://signal-api:8080/v1/qrcodelink/raw?device_name=signal-media-bot" | python -c "import json, sys; print(json.load(sys.stdin)[\"device_link_uri\"] , end=\"\")" | qrencode -t UTF8 -l H -m 4'
 ```
 
-Scan the QR code shown in the terminal with Signal under **Settings > Linked devices > Link new device**. If the raw endpoint is unavailable, save the normal response and inspect it:
+Scan the QR code shown in the terminal with Signal under **Settings > Linked devices > Link new device**. Each request creates a new one-time QR code, so scan the latest code without rerunning the command. If the raw endpoint is unavailable, save the normal response and inspect it:
 
 ```sh
 curl -fsS -o pairing.html "http://127.0.0.1:18080/v1/qrcodelink?device_name=signal-media-bot"
