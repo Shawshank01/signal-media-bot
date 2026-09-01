@@ -1,0 +1,42 @@
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-api
+    restart: unless-stopped
+    environment:
+      MODE: json-rpc
+      AUTO_RECEIVE_EVENTS: "true"
+      JSON_RPC_IGNORE_ATTACHMENTS: "false"
+      RECEIVE_WEBHOOK_URL: http://signal-bot:8000/webhook/signal
+    ports:
+      - "${SIGNAL_API_PORT:-18080}:8080"
+    volumes:
+      - signal_cli_data:/home/.local/share/signal-cli
+      - shared_media:/tmp/signal_shared_media
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  signal-bot:
+    image: "${SIGNAL_MEDIA_IMAGE:?Set SIGNAL_MEDIA_IMAGE in .env}"
+    container_name: signal-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SIGNAL_API_URL: http://signal-api:8080
+      SHARED_MEDIA_DIR: /tmp/signal_shared_media
+    ports:
+      - "${BOT_PORT:-18000}:8000"
+    volumes:
+      - shared_media:/tmp/signal_shared_media
+    depends_on:
+      signal-api:
+        condition: service_healthy
+
+volumes:
+  signal_cli_data:
+  shared_media:
