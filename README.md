@@ -20,7 +20,7 @@ BOT_PHONE_NUMBER=+
 BOT_UUID=
 ```
 
-`BOT_PHONE_NUMBER` is required. Setting `BOT_UUID` is optional but strongly recommended ([see how to get it](#obtaining-the-bots-uuid-recommended)). Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
+`BOT_PHONE_NUMBER` is required. Set `BOT_UUID` to enable native Signal `@` mentions ([see how to get it](#obtaining-the-bots-uuid-recommended)). The visible Signal account name can change without affecting native mentions. Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
 
 ## Signal Account
 
@@ -61,7 +61,7 @@ head -c 500 pairing.html
 
 ### Obtaining the Bot's UUID (Recommended)
 
-Signal uses UUIDs (ACI) to identify accounts. Setting `BOT_UUID` in `.env` is **strongly recommended** because:
+Signal uses UUIDs (ACI) to identify accounts. Set `BOT_UUID` in `.env` to enable native Signal `@` mentions because:
 
 - **Phone Number Privacy**: If the bot account hides its phone number under Signal privacy settings ("Who can see my number: Nobody"), outgoing events and identity envelopes will report the bot via its UUID (`sourceUuid`) with the phone number omitted.
 - **Native Group Mentions**: When group members select the bot from Signal's native `@` popup list, Signal generates a structured mention payload containing only the bot's UUID.
@@ -80,7 +80,7 @@ BOT_PHONE_NUMBER=$(sed -n 's/^BOT_PHONE_NUMBER=//p' .env)
 curl -s "http://127.0.0.1:18080/v1/identities/${BOT_PHONE_NUMBER}"
 ```
 
-Only set `BOT_UUID` if a gateway response or incoming event explicitly provides the bot's UUID:
+Set `BOT_UUID` to the UUID from the identity record whose `number` matches `BOT_PHONE_NUMBER`:
 
 ```dotenv
 BOT_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -115,7 +115,7 @@ In a group, use a command or mention:
 ```text
 /dl https://example.com/video
 !dl https://x.com/user/status/123
-@signalbot https://www.youtube.com/watch?v=...
+@<the bot's Signal account name> https://www.youtube.com/watch?v=...
 ```
 
 ## Update

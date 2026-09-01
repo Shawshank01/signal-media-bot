@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     bot_uuid: str | None = None
     signal_api_url: str = "http://signal-api:8080"
     webhook_path: str = "/webhook/signal"
-    bot_mention_names: str = "bot,signalbot"
     trigger_prefixes: str = "/dl,!dl"
     max_file_size_mb: int = 100
     max_urls_per_message: int = 4
@@ -46,10 +45,6 @@ class Settings(BaseSettings):
     @property
     def max_file_size(self) -> int:
         return self.max_file_size_mb * 1024 * 1024
-
-    @property
-    def mention_names(self) -> tuple[str, ...]:
-        return tuple(x.strip().lstrip("@").lower() for x in self.bot_mention_names.split(",") if x.strip())
 
     @property
     def prefixes(self) -> tuple[str, ...]:
@@ -142,12 +137,10 @@ def signal_recipient(message: IncomingMessage) -> str:
 def group_triggered(message: IncomingMessage, settings: Settings) -> bool:
     lowered = message.text.lower().strip()
     prefix = any(lowered == item or lowered.startswith(item + " ") for item in settings.prefixes)
-    named_mention = any(re.search(r"@" + re.escape(name) + r"(?:\b|$)", message.text, re.IGNORECASE) for name in settings.mention_names)
-    structured_mention = bool(message.mentions) and any(
-        str(item.get("uuid") or item.get("number") or "") in {settings.bot_uuid or "", settings.bot_phone_number}
-        for item in message.mentions
+    native_mention = bool(settings.bot_uuid) and any(
+        str(item.get("uuid") or "") == settings.bot_uuid for item in message.mentions
     )
-    return prefix or named_mention or structured_mention
+    return prefix or native_mention
 
 
 def message_urls(message: IncomingMessage, settings: Settings) -> list[str]:
