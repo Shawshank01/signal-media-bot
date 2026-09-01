@@ -20,10 +20,11 @@ BOT_PHONE_NUMBER=+
 BOT_UUID=
 SIGNAL_MEDIA_IMAGE=michifumi/signal-media-bot:latest
 BOT_MENTION_NAMES=bot,signalbot
-WEBHOOK_SECRET=change-this-to-a-long-random-secret
 ```
 
-`BOT_PHONE_NUMBER` is required. Setting `BOT_UUID` is strongly recommended (see below). Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
+`BOT_PHONE_NUMBER` is required. Setting `BOT_UUID` is optional but strongly recommended ([see how to get it](#obtaining-the-bots-uuid-recommended)). Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
+
+The host ports are bound to `127.0.0.1` and are not publicly accessible. The containers communicate over Docker's internal network.
 
 ## Signal Account
 
@@ -37,13 +38,13 @@ Start the Signal API:
 docker compose up -d signal-api
 ```
 
-View the available API endpoints directly in the VPS terminal:
+View the available API endpoints:
 
 ```sh
 curl -s http://127.0.0.1:18080/openapi.json | less
 ```
 
-Use the registration endpoints shown in that output to submit the captcha, request the SMS code, and verify the code. All commands run on the VPS.
+Use the registration endpoints shown in that output to submit the captcha, request the SMS code, and verify the code.
 
 ### Link Existing Account
 
@@ -123,4 +124,9 @@ docker compose pull signal-bot
 docker compose up -d signal-bot
 ```
 
-The bot uses ports `8080` and `8000` internally. The default VPS host ports are `18080` and `18000`. Keep `.env` and Docker volumes private.
+## Credits
+
+- **[signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)** – Dockerized REST/JSON-RPC API gateway for Signal messaging and webhook routing.
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** – Media extraction engine supporting YouTube, TikTok, Instagram, Reddit, and hundreds of other platforms.
+- **[FxTwitter / FixTweet](https://github.com/FixTweet/FxTwitter)** – API engine for Twitter/X media extraction and CDN stream resolution.
+- **[FFmpeg](https://ffmpeg.org/)** – Multimedia framework for audio/video stream multiplexing.

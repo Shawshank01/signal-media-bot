@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import httpx
 import yt_dlp
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     bot_uuid: str | None = None
     signal_api_url: str = "http://signal-api:8080"
     webhook_path: str = "/webhook/signal"
-    webhook_secret: str | None = None
     bot_mention_names: str = "bot,signalbot"
     trigger_prefixes: str = "/dl,!dl"
     max_file_size_mb: int = 100
@@ -291,9 +290,7 @@ async def health() -> dict[str, str]:
 
 
 @app.post(settings.webhook_path)
-async def webhook(request: Request, x_webhook_secret: str | None = Header(default=None)) -> dict[str, str]:
-    if settings.webhook_secret and x_webhook_secret != settings.webhook_secret:
-        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+async def webhook(request: Request) -> dict[str, str]:
     try:
         payload = await request.json()
     except json.JSONDecodeError as exc:

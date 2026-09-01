@@ -9,7 +9,7 @@ services:
       JSON_RPC_IGNORE_ATTACHMENTS: "false"
       RECEIVE_WEBHOOK_URL: http://signal-bot:8000/webhook/signal
     ports:
-      - "${SIGNAL_API_PORT:-18080}:8080"
+      - "127.0.0.1:${SIGNAL_API_PORT:-18080}:8080"
     volumes:
       - signal_cli_data:/home/.local/share/signal-cli
       - shared_media:/tmp/signal_shared_media
@@ -30,7 +30,7 @@ services:
       SIGNAL_API_URL: http://signal-api:8080
       SHARED_MEDIA_DIR: /tmp/signal_shared_media
     ports:
-      - "${BOT_PORT:-18000}:8000"
+      - "127.0.0.1:${BOT_PORT:-18000}:8000"
     volumes:
       - shared_media:/tmp/signal_shared_media
     depends_on:
