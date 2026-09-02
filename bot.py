@@ -325,9 +325,13 @@ async def download_with_ytdlp(
             "restrictfilenames": True,
             "socket_timeout": config.download_timeout_seconds,
             "js_runtimes": {"deno": {}},
+            "remote_components": ["ejs:github"],
         }
+        temporary_cookie_file: Path | None = None
         if config.cookies_file and config.cookies_file.is_file():
-            options["cookiefile"] = str(config.cookies_file)
+            temporary_cookie_file = destination / ".cookies.txt"
+            shutil.copyfile(config.cookies_file, temporary_cookie_file)
+            options["cookiefile"] = str(temporary_cookie_file)
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 downloader.download([url])
@@ -335,7 +339,14 @@ async def download_with_ytdlp(
             raise DownloadError(
                 "The link is private, unavailable, or could not be extracted."
             ) from exc
-        return [path for path in destination.iterdir() if path.is_file()]
+        finally:
+            if temporary_cookie_file:
+                temporary_cookie_file.unlink(missing_ok=True)
+        return [
+            path
+            for path in destination.iterdir()
+            if path.is_file() and path.name != ".cookies.txt"
+        ]
 
     try:
         paths = await asyncio.wait_for(

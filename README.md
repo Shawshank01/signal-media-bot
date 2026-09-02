@@ -160,7 +160,14 @@ YouTube frequently blocks requests from VPS/datacenter IPs. To resolve this, you
    sudo docker compose run --rm signal-bot test -r /app/cookies.txt
    ```
 
-5. Restart the bot container:
+5. Test YouTube extraction. The command copies the read-only mount to a temporary writable file because yt-dlp may update its cookie jar:
+
+   ```sh
+   sudo docker compose run --rm signal-bot sh -c \
+     'cp /app/cookies.txt /tmp/cookies.txt && yt-dlp --cookies /tmp/cookies.txt --remote-components ejs:github --simulate --no-playlist "https://www.youtube.com/watch?v=VIDEO_ID"'
+   ```
+
+6. Restart the bot container:
 
    ```sh
    docker compose up -d signal-bot
