@@ -33,6 +33,7 @@ services:
       - "127.0.0.1:${BOT_PORT:-18000}:8000"
     volumes:
       - shared_media:/tmp/signal_shared_media
+      - ./cookies.txt:/app/cookies.txt:ro
     depends_on:
       signal-api:
         condition: service_healthy

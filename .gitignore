@@ -219,3 +219,5 @@ __marimo__/
 
 # Apple specific
 .DS_Store
+cookies.txt
+cookies/

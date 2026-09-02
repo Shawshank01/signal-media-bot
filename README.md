@@ -141,6 +141,31 @@ docker compose pull signal-bot
 docker compose up -d signal-bot
 ```
 
+## YouTube Cookies (Optional)
+
+YouTube frequently blocks requests from VPS/datacenter IPs. To resolve this, you can provide an exported browser `cookies.txt`:
+
+1. Export cookies from your browser in Netscape format using an extension recomended by [yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+2. Copy `cookies.txt` into the `signal-media-bot` directory on your VPS.
+3. Make the file readable by the bot container, while keeping it private from other users:
+
+   ```yaml
+   sudo chown root:10001 cookies.txt
+   sudo chmod 640 cookies.txt
+   ```
+
+4. Confirm the container can read the mounted file:
+
+   ```sh
+   sudo docker compose run --rm signal-bot test -r /app/cookies.txt
+   ```
+
+5. Restart the bot container:
+
+   ```sh
+   docker compose up -d signal-bot
+   ```
+
 ## Credits
 
 - **[signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)** – Dockerized REST/JSON-RPC API gateway for Signal messaging and webhook routing.

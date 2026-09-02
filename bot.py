@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     fxtwitter_api_url: str = "https://api.fxtwitter.com"
     fxbsky_api_url: str = "https://api.fxbsky.app"
     shared_media_dir: Path = Path("/tmp/signal_shared_media")
+    cookies_file: Path | None = Path("/app/cookies.txt")
     user_agent: str = "signal-media-bot/1.0"
 
     @property
@@ -324,6 +325,8 @@ async def download_with_ytdlp(
             "restrictfilenames": True,
             "socket_timeout": config.download_timeout_seconds,
         }
+        if config.cookies_file and config.cookies_file.is_file():
+            options["cookiefile"] = str(config.cookies_file)
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 downloader.download([url])
