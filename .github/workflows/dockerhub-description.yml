@@ -1,0 +1,28 @@
+name: Update Docker Hub Description
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "README.md"
+      - ".github/workflows/dockerhub-description.yml"
+  workflow_dispatch:
+
+jobs:
+  dockerhub-description:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Docker Hub Overview
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/signal-media-bot
+          short-description: "Download media from links in Signal DMs and groups, then send back as attachments."
+          readme-filepath: ./README.md
+          enable-url-completion: true
