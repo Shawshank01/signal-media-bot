@@ -324,6 +324,7 @@ async def download_with_ytdlp(
             "no_warnings": True,
             "restrictfilenames": True,
             "socket_timeout": config.download_timeout_seconds,
+            "js_runtimes": {"deno": {}},
         }
         if config.cookies_file and config.cookies_file.is_file():
             options["cookiefile"] = str(config.cookies_file)
