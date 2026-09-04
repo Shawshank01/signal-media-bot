@@ -134,6 +134,18 @@ In a group, use a command or mention:
 @<the bot's Signal account name> https://www.youtube.com/watch?v=...
 ```
 
+Optional command arguments can force audio-only output, cap video resolution, or allow codecs with wider compatibility tradeoffs:
+
+```text
+/dl <url> audio
+/dl <url> 720
+/dl <url> 480
+/dl <url> 360
+/dl <url> bestmini
+```
+
+Video downloads are selected as the highest available video and audio combination. If the video file is larger than 100 MB, it will step down through the available resolutions. If no video format fits, it explains how to request audio only.
+
 ## Update
 
 ```sh

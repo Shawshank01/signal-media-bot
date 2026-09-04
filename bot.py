@@ -80,6 +80,13 @@ class DownloadedMedia:
     content_type: str
 
 
+@dataclass(frozen=True)
+class DownloadOptions:
+    audio_only: bool = False
+    max_height: int | None = None
+    bestmini: bool = False
+
+
 def _first_dict(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return value
@@ -183,8 +190,108 @@ def message_urls(message: IncomingMessage, settings: Settings) -> list[str]:
     return list(dict.fromkeys(urls))[: settings.max_urls_per_message]
 
 
+def download_options(message: IncomingMessage) -> DownloadOptions:
+    command_text = URL_RE.sub(" ", message.text.lower())
+    tokens = set(re.findall(r"\b(audio|bestmini|360|480|720|1080)\b", command_text))
+    heights = [int(token) for token in tokens if token.isdigit()]
+    return DownloadOptions(
+        audio_only="audio" in tokens,
+        max_height=max(heights) if heights else None,
+        bestmini="bestmini" in tokens,
+    )
+
+
 class DownloadError(Exception):
     pass
+
+
+def _format_size(format_info: dict[str, Any]) -> int | None:
+    size = format_info.get("filesize") or format_info.get("filesize_approx")
+    return int(size) if size else None
+
+
+def select_ytdlp_format(
+    info: dict[str, Any], config: Settings, options: DownloadOptions
+) -> str:
+    formats = [item for item in info.get("formats", []) if isinstance(item, dict)]
+    if options.audio_only:
+        audio = [item for item in formats if item.get("vcodec") == "none"]
+        audio.sort(key=lambda item: int(item.get("abr") or 0), reverse=True)
+        selected = next(
+            (
+                item
+                for item in audio
+                if (size := _format_size(item)) is not None
+                and size <= config.max_file_size
+            ),
+            None,
+        )
+        if not selected:
+            raise DownloadError(
+                f"No audio format fits within {config.max_file_size_mb} MB."
+            )
+        return str(selected["format_id"])
+
+    video = [
+        item
+        for item in formats
+        if item.get("vcodec") not in (None, "none")
+        and (
+            options.max_height is None
+            or int(item.get("height") or 0) <= options.max_height
+        )
+    ]
+    audio = [item for item in formats if item.get("vcodec") == "none"]
+    codec_order = (
+        ("av01", "avc1", "vp9") if options.bestmini else ("av01", "avc1")
+    )
+    audio_order = ("opus", "mp4a") if options.bestmini else ("mp4a", "opus")
+
+    def codec_rank(item: dict[str, Any], codecs: tuple[str, ...], field: str) -> int:
+        codec = str(item.get(field) or "")
+        return next(
+            (
+                index
+                for index, preferred in enumerate(codecs)
+                if codec.startswith(preferred)
+            ),
+            len(codecs),
+        )
+
+    video.sort(
+        key=lambda item: (
+            -int(item.get("height") or 0),
+            codec_rank(item, codec_order, "vcodec"),
+        )
+    )
+    audio.sort(
+        key=lambda item: (
+            -int(item.get("abr") or 0),
+            codec_rank(item, audio_order, "acodec"),
+        )
+    )
+
+    for video_format in video:
+        if video_format.get("acodec") not in (None, "none"):
+            size = _format_size(video_format)
+            if size is not None and size <= config.max_file_size:
+                return str(video_format["format_id"])
+            continue
+        video_size = _format_size(video_format)
+        if video_size is None:
+            continue
+        for audio_format in audio:
+            audio_size = _format_size(audio_format)
+            if (
+                audio_size is not None
+                and video_size + audio_size <= config.max_file_size
+            ):
+                return f"{video_format['format_id']}+{audio_format['format_id']}"
+
+    raise DownloadError(
+        f"This video is too large to send, even at the lowest video quality. "
+        f"Try `/dl <url> audio` to download only its audio."
+    )
 
 
 class FxTwitterClient:
@@ -291,7 +398,8 @@ async def stream_to_file(
             length = int(response.headers.get("content-length") or 0)
             if length > config.max_file_size:
                 raise DownloadError(
-                    f"The media is larger than {config.max_file_size_mb} MB."
+                    f"This media is too large to send within {config.max_file_size_mb} MB. "
+                    "Try `/dl <url> audio` to download only its audio."
                 )
             total = 0
             with path.open("wb") as output:
@@ -299,7 +407,8 @@ async def stream_to_file(
                     total += len(chunk)
                     if total > config.max_file_size:
                         raise DownloadError(
-                            f"The media is larger than {config.max_file_size_mb} MB."
+                            f"This media is too large to send within {config.max_file_size_mb} MB. "
+                            "Try `/dl <url> audio` to download only its audio."
                         )
                     output.write(chunk)
         content_type = response.headers.get(
@@ -311,15 +420,16 @@ async def stream_to_file(
 
 
 async def download_with_ytdlp(
-    url: str, destination: Path, config: Settings
+    url: str,
+    destination: Path,
+    config: Settings,
+    options: DownloadOptions = DownloadOptions(),
 ) -> list[DownloadedMedia]:
     def run() -> list[Path]:
-        options = {
+        ytdlp_options = {
             "outtmpl": str(destination / "%(id)s.%(ext)s"),
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
-            "max_filesize": config.max_file_size,
             "quiet": True,
             "no_warnings": True,
             "restrictfilenames": True,
@@ -331,9 +441,14 @@ async def download_with_ytdlp(
         if config.cookies_file and config.cookies_file.is_file():
             temporary_cookie_file = destination / ".cookies.txt"
             shutil.copyfile(config.cookies_file, temporary_cookie_file)
-            options["cookiefile"] = str(temporary_cookie_file)
+            ytdlp_options["cookiefile"] = str(temporary_cookie_file)
         try:
-            with yt_dlp.YoutubeDL(options) as downloader:
+            with yt_dlp.YoutubeDL(ytdlp_options) as downloader:
+                info = downloader.extract_info(url, download=False)
+                ytdlp_options["format"] = select_ytdlp_format(
+                    info, config, options
+                )
+                downloader.params["format"] = ytdlp_options["format"]
                 downloader.download([url])
         except (yt_dlp.utils.DownloadError, OSError) as exc:
             raise DownloadError(
@@ -359,7 +474,8 @@ async def download_with_ytdlp(
     for path in paths:
         if path.stat().st_size > config.max_file_size:
             raise DownloadError(
-                f"The media is larger than {config.max_file_size_mb} MB."
+                f"This media is too large to send within {config.max_file_size_mb} MB. "
+                "Try `/dl <url> audio` to download only its audio."
             )
     return [
         DownloadedMedia(
@@ -431,7 +547,9 @@ async def process_message(
             elif is_bsky_url(url):
                 media = await bsky.download(url, workdir)
             else:
-                media = await download_with_ytdlp(url, workdir, config)
+                media = await download_with_ytdlp(
+                    url, workdir, config, download_options(message)
+                )
             await signal.send("", message, media)
         except DownloadError as exc:
             log.info("Download failed for %s: %s", url, exc)
