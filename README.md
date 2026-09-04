@@ -1,6 +1,6 @@
 # Signal Media Bot
 
-Download media from links in Signal DMs and groups, then send the media back as Signal attachments.
+Download media from links in Signal DMs and groups, then send the media back as Signal native playable attachments.
 
 > [!CAUTION]
 > **Privacy & Cloud Hosting Risks**:
@@ -32,7 +32,7 @@ BOT_PHONE_NUMBER=+
 BOT_UUID=
 ```
 
-`BOT_PHONE_NUMBER` is required. Set `BOT_UUID` to enable native Signal `@` mentions ([see how to get it](#obtaining-the-bots-uuid-recommended)). The visible Signal account name can change without affecting native mentions. Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
+`BOT_PHONE_NUMBER` is required. Set `BOT_UUID` to enable native Signal `@` mentions ([see how to get it](#obtaining-the-bots-uuid-recommended)). The name of the bot Signal account can be changed without affecting native mentions. Change `SIGNAL_API_PORT` or `BOT_PORT` if the default host ports are already in use.
 
 ## Signal Account
 
@@ -46,7 +46,7 @@ Start the Signal API:
 docker compose up -d signal-api
 ```
 
-Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The gateway does not provide FastAPI's `/openapi.json` endpoint.
+Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The `signal-api` container runs in JSON-RPC mode and does not serve a Swagger UI, refer to the [signal-cli-rest-api docs](https://github.com/bbernhard/signal-cli-rest-api) for available endpoints.
 
 ### Link Existing Account
 

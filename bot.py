@@ -205,15 +205,25 @@ class DownloadError(Exception):
     pass
 
 
-def _format_size(format_info: dict[str, Any]) -> int | None:
+def _format_size(
+    format_info: dict[str, Any], duration: float | None = None
+) -> int | None:
     size = format_info.get("filesize") or format_info.get("filesize_approx")
-    return int(size) if size else None
+    if size:
+        return int(size)
+    format_duration = format_info.get("duration") or duration
+    bitrate = format_info.get("tbr") or format_info.get("abr")
+    if bitrate and format_duration:
+        estimated_size = int(float(bitrate) * 1000 / 8 * float(format_duration))
+        return int(estimated_size * 1.15)
+    return None
 
 
 def select_ytdlp_format(
     info: dict[str, Any], config: Settings, options: DownloadOptions
 ) -> str:
     formats = [item for item in info.get("formats", []) if isinstance(item, dict)]
+    duration = info.get("duration")
     if options.audio_only:
         audio = [item for item in formats if item.get("vcodec") == "none"]
         audio.sort(key=lambda item: int(item.get("abr") or 0), reverse=True)
@@ -221,7 +231,7 @@ def select_ytdlp_format(
             (
                 item
                 for item in audio
-                if (size := _format_size(item)) is not None
+                if (size := _format_size(item, duration)) is not None
                 and size <= config.max_file_size
             ),
             None,
@@ -242,9 +252,7 @@ def select_ytdlp_format(
         )
     ]
     audio = [item for item in formats if item.get("vcodec") == "none"]
-    codec_order = (
-        ("av01", "avc1", "vp9") if options.bestmini else ("av01", "avc1")
-    )
+    codec_order = ("av01", "avc1", "vp9") if options.bestmini else ("av01", "avc1")
     audio_order = ("opus", "mp4a") if options.bestmini else ("mp4a", "opus")
 
     def codec_rank(item: dict[str, Any], codecs: tuple[str, ...], field: str) -> int:
@@ -273,15 +281,15 @@ def select_ytdlp_format(
 
     for video_format in video:
         if video_format.get("acodec") not in (None, "none"):
-            size = _format_size(video_format)
+            size = _format_size(video_format, duration)
             if size is not None and size <= config.max_file_size:
                 return str(video_format["format_id"])
             continue
-        video_size = _format_size(video_format)
+        video_size = _format_size(video_format, duration)
         if video_size is None:
             continue
         for audio_format in audio:
-            audio_size = _format_size(audio_format)
+            audio_size = _format_size(audio_format, duration)
             if (
                 audio_size is not None
                 and video_size + audio_size <= config.max_file_size
@@ -289,8 +297,8 @@ def select_ytdlp_format(
                 return f"{video_format['format_id']}+{audio_format['format_id']}"
 
     raise DownloadError(
-        f"This video is too large to send, even at the lowest video quality. "
-        f"Try `/dl <url> audio` to download only its audio."
+        "This video is too large to send, even at the lowest video quality. "
+        "Try `/dl <url> audio` to download only its audio."
     )
 
 
@@ -423,8 +431,11 @@ async def download_with_ytdlp(
     url: str,
     destination: Path,
     config: Settings,
-    options: DownloadOptions = DownloadOptions(),
+    options: DownloadOptions | None = None,
 ) -> list[DownloadedMedia]:
+    if options is None:
+        options = DownloadOptions()
+
     def run() -> list[Path]:
         ytdlp_options = {
             "outtmpl": str(destination / "%(id)s.%(ext)s"),
@@ -443,12 +454,10 @@ async def download_with_ytdlp(
             shutil.copyfile(config.cookies_file, temporary_cookie_file)
             ytdlp_options["cookiefile"] = str(temporary_cookie_file)
         try:
+            with yt_dlp.YoutubeDL(ytdlp_options) as extractor:
+                info = extractor.extract_info(url, download=False)
+            ytdlp_options["format"] = select_ytdlp_format(info, config, options)
             with yt_dlp.YoutubeDL(ytdlp_options) as downloader:
-                info = downloader.extract_info(url, download=False)
-                ytdlp_options["format"] = select_ytdlp_format(
-                    info, config, options
-                )
-                downloader.params["format"] = ytdlp_options["format"]
                 downloader.download([url])
         except (yt_dlp.utils.DownloadError, OSError) as exc:
             raise DownloadError(
