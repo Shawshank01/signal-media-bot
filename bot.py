@@ -99,6 +99,12 @@ class DownloadedMedia:
 
 
 @dataclass(frozen=True)
+class DownloadResult:
+    media: list[DownloadedMedia]
+    text: str = ""
+
+
+@dataclass(frozen=True)
 class DownloadOptions:
     audio_only: bool = False
     max_height: int | None = None
@@ -219,6 +225,11 @@ def download_options(message: IncomingMessage) -> DownloadOptions:
     )
 
 
+def format_caption(text: str, url: str) -> str:
+    cleaned = text.strip()
+    return f"{cleaned}\n\nSource: {url}" if cleaned else f"Source: {url}"
+
+
 class DownloadError(Exception):
     pass
 
@@ -333,7 +344,7 @@ class FxTwitterClient:
         self.client = client
         self.config = config
 
-    async def download(self, url: str, destination: Path) -> list[DownloadedMedia]:
+    async def download(self, url: str, destination: Path) -> DownloadResult:
         match = X_STATUS_RE.search(urlparse(url).path)
         if not match:
             raise DownloadError("That X link is not a status post.")
@@ -341,6 +352,7 @@ class FxTwitterClient:
         response = await self.client.get(api_url)
         response.raise_for_status()
         data = response.json().get("tweet", {})
+        text = str(data.get("text") or "").strip()
         media = data.get("media") or {}
         videos = media.get("videos") or []
         photos = media.get("photos") or []
@@ -348,11 +360,10 @@ class FxTwitterClient:
             video = max(videos, key=lambda item: int(item.get("bitrate") or 0))
             media_url = video.get("url")
             if media_url:
-                return [
-                    await stream_to_file(
-                        self.client, media_url, destination / "video.mp4", self.config
-                    )
-                ]
+                downloaded = await stream_to_file(
+                    self.client, media_url, destination / "video.mp4", self.config
+                )
+                return DownloadResult(media=[downloaded], text=text)
         if photos:
             output: list[DownloadedMedia] = []
             for index, photo in enumerate(photos):
@@ -367,7 +378,7 @@ class FxTwitterClient:
                         )
                     )
             if output:
-                return output
+                return DownloadResult(media=output, text=text)
         raise DownloadError("No downloadable media was found in that post.")
 
 
@@ -376,7 +387,7 @@ class FxBlueskyClient:
         self.client = client
         self.config = config
 
-    async def download(self, url: str, destination: Path) -> list[DownloadedMedia]:
+    async def download(self, url: str, destination: Path) -> DownloadResult:
         match = BSKY_POST_RE.search(urlparse(url).path)
         if not match:
             raise DownloadError("That Bluesky link is not a post.")
@@ -385,6 +396,7 @@ class FxBlueskyClient:
         response = await self.client.get(api_url)
         response.raise_for_status()
         data = response.json().get("status", {})
+        text = str(data.get("text") or "").strip()
         media = data.get("media") or {}
         videos = media.get("videos") or []
         photos = media.get("photos") or []
@@ -400,11 +412,10 @@ class FxBlueskyClient:
             )
             media_url = selected.get("url") or video.get("url")
             if media_url:
-                return [
-                    await stream_to_file(
-                        self.client, media_url, destination / "video.mp4", self.config
-                    )
-                ]
+                downloaded = await stream_to_file(
+                    self.client, media_url, destination / "video.mp4", self.config
+                )
+                return DownloadResult(media=[downloaded], text=text)
         if photos:
             output: list[DownloadedMedia] = []
             for index, photo in enumerate(photos):
@@ -419,7 +430,7 @@ class FxBlueskyClient:
                         )
                     )
             if output:
-                return output
+                return DownloadResult(media=output, text=text)
         raise DownloadError("No downloadable media was found in that post.")
 
 
@@ -460,11 +471,11 @@ async def download_with_ytdlp(
     destination: Path,
     config: Settings,
     options: DownloadOptions | None = None,
-) -> list[DownloadedMedia]:
+) -> DownloadResult:
     if options is None:
         options = DownloadOptions()
 
-    def run() -> list[Path]:
+    def run() -> tuple[list[Path], str]:
         ytdlp_options: dict[str, Any] = {
             "outtmpl": str(destination / "%(id)s.%(ext)s"),
             "merge_output_format": "mp4",
@@ -481,10 +492,12 @@ async def download_with_ytdlp(
             temporary_cookie_file = destination / ".cookies.txt"
             shutil.copyfile(config.cookies_file, temporary_cookie_file)
             ytdlp_options["cookiefile"] = str(temporary_cookie_file)
+        title = ""
         try:
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
                 info = extractor.extract_info(url, download=False)
             ytdlp_options["format"] = select_ytdlp_format(info, config, options)
+            title = str(info.get("title") or "").strip()
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
                 downloader.download([url])
         except (YtDlpDownloadError, OSError) as exc:
@@ -494,14 +507,17 @@ async def download_with_ytdlp(
         finally:
             if temporary_cookie_file:
                 temporary_cookie_file.unlink(missing_ok=True)
-        return [
-            path
-            for path in destination.iterdir()
-            if path.is_file() and path.name != ".cookies.txt"
-        ]
+        return (
+            [
+                path
+                for path in destination.iterdir()
+                if path.is_file() and path.name != ".cookies.txt"
+            ],
+            title,
+        )
 
     try:
-        paths = await asyncio.wait_for(
+        paths, title = await asyncio.wait_for(
             asyncio.to_thread(run), config.download_timeout_seconds
         )
     except asyncio.TimeoutError as exc:
@@ -519,17 +535,20 @@ async def download_with_ytdlp(
                 f"This media is too large to send within {config.max_file_size_mb} MB. "
                 "Try `/dl <url> audio` to download only its audio."
             )
-    return [
-        DownloadedMedia(
-            path,
-            "video/mp4"
-            if path.suffix.lower() == ".mp4"
-            else AUDIO_CONTENT_TYPES.get(
-                path.suffix.lower(), "application/octet-stream"
-            ),
-        )
-        for path in paths
-    ]
+    return DownloadResult(
+        media=[
+            DownloadedMedia(
+                path,
+                "video/mp4"
+                if path.suffix.lower() == ".mp4"
+                else AUDIO_CONTENT_TYPES.get(
+                    path.suffix.lower(), "application/octet-stream"
+                ),
+            )
+            for path in paths
+        ],
+        text=title,
+    )
 
 
 class SignalClient:
@@ -587,14 +606,15 @@ async def process_message(
         try:
             await signal.send("Downloading media...", message)
             if is_x_url(url):
-                media = await fx.download(url, workdir)
+                result = await fx.download(url, workdir)
             elif is_bsky_url(url):
-                media = await bsky.download(url, workdir)
+                result = await bsky.download(url, workdir)
             else:
-                media = await download_with_ytdlp(
+                result = await download_with_ytdlp(
                     url, workdir, config, download_options(message)
                 )
-            await signal.send("", message, media)
+            caption = format_caption(result.text, url)
+            await signal.send(caption, message, result.media)
         except DownloadError as exc:
             log.info("Download failed for %s: %s", url, exc)
             await send_error(signal, str(exc), message)
