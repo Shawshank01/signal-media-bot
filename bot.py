@@ -354,31 +354,112 @@ class FxTwitterClient:
         data = response.json().get("tweet", {})
         text = str(data.get("text") or "").strip()
         media = data.get("media") or {}
-        videos = media.get("videos") or []
-        photos = media.get("photos") or []
-        if videos:
-            video = max(videos, key=lambda item: int(item.get("bitrate") or 0))
-            media_url = video.get("url")
-            if media_url:
-                downloaded = await stream_to_file(
-                    self.client, media_url, destination / "video.mp4", self.config
-                )
-                return DownloadResult(media=[downloaded], text=text)
-        if photos:
-            output: list[DownloadedMedia] = []
-            for index, photo in enumerate(photos):
-                media_url = photo.get("url")
-                if media_url:
-                    output.append(
-                        await stream_to_file(
-                            self.client,
-                            media_url,
-                            destination / f"image-{index}.jpg",
-                            self.config,
-                        )
+
+        output: list[DownloadedMedia] = []
+        had_video = False
+
+        all_items = media.get("all") or []
+        if all_items:
+            v_idx = 0
+            p_idx = 0
+            for item in all_items:
+                item_type = str(item.get("type") or "").lower()
+                if item_type in ("video", "gif"):
+                    had_video = True
+                    variants = [
+                        v for v in item.get("variants", []) if isinstance(v, dict)
+                    ]
+                    candidates = sorted(
+                        variants or [item],
+                        key=lambda v: int(v.get("bitrate") or 0),
+                        reverse=True,
                     )
-            if output:
-                return DownloadResult(media=output, text=text)
+                    filename = (
+                        f"video-{v_idx}.mp4" if len(all_items) > 1 else "video.mp4"
+                    )
+                    v_idx += 1
+                    for candidate in candidates:
+                        media_url = candidate.get("url") or item.get("url")
+                        if not media_url:
+                            continue
+                        try:
+                            downloaded = await stream_to_file(
+                                self.client,
+                                media_url,
+                                destination / filename,
+                                self.config,
+                            )
+                            output.append(downloaded)
+                            break
+                        except DownloadError as exc:
+                            if "too large to send" in str(exc):
+                                continue
+                            raise
+                elif item_type == "photo":
+                    media_url = item.get("url")
+                    if media_url:
+                        filename = f"image-{p_idx}.jpg"
+                        p_idx += 1
+                        output.append(
+                            await stream_to_file(
+                                self.client,
+                                media_url,
+                                destination / filename,
+                                self.config,
+                            )
+                        )
+        else:
+            videos = media.get("videos") or []
+            photos = media.get("photos") or []
+            if videos:
+                had_video = True
+                for v_idx, video in enumerate(videos):
+                    variants = [
+                        v for v in video.get("variants", []) if isinstance(v, dict)
+                    ]
+                    candidates = sorted(
+                        variants or [video],
+                        key=lambda v: int(v.get("bitrate") or 0),
+                        reverse=True,
+                    )
+                    filename = f"video-{v_idx}.mp4" if len(videos) > 1 else "video.mp4"
+                    for candidate in candidates:
+                        media_url = candidate.get("url") or video.get("url")
+                        if not media_url:
+                            continue
+                        try:
+                            downloaded = await stream_to_file(
+                                self.client,
+                                media_url,
+                                destination / filename,
+                                self.config,
+                            )
+                            output.append(downloaded)
+                            break
+                        except DownloadError as exc:
+                            if "too large to send" in str(exc):
+                                continue
+                            raise
+            if photos:
+                for p_idx, photo in enumerate(photos):
+                    media_url = photo.get("url")
+                    if media_url:
+                        output.append(
+                            await stream_to_file(
+                                self.client,
+                                media_url,
+                                destination / f"image-{p_idx}.jpg",
+                                self.config,
+                            )
+                        )
+
+        if output:
+            return DownloadResult(media=output, text=text)
+        if had_video:
+            raise DownloadError(
+                f"This media is too large to send within {self.config.max_file_size_mb} MB. "
+                "Try `/dl <url> audio` to download only its audio."
+            )
         raise DownloadError("No downloadable media was found in that post.")
 
 
@@ -400,24 +481,37 @@ class FxBlueskyClient:
         media = data.get("media") or {}
         videos = media.get("videos") or []
         photos = media.get("photos") or []
+        output: list[DownloadedMedia] = []
+        had_video = False
         if videos:
-            video = videos[0]
-            formats = [
-                item
-                for item in video.get("formats", [])
-                if item.get("container") == "mp4"
-            ]
-            selected = max(
-                formats or [video], key=lambda item: int(item.get("bitrate") or 0)
-            )
-            media_url = selected.get("url") or video.get("url")
-            if media_url:
-                downloaded = await stream_to_file(
-                    self.client, media_url, destination / "video.mp4", self.config
+            had_video = True
+            for v_idx, video in enumerate(videos):
+                formats = [
+                    item
+                    for item in video.get("formats", [])
+                    if item.get("container") == "mp4"
+                ]
+                candidates = sorted(
+                    formats or [video],
+                    key=lambda item: int(item.get("bitrate") or 0),
+                    reverse=True,
                 )
-                return DownloadResult(media=[downloaded], text=text)
+                filename = f"video-{v_idx}.mp4" if len(videos) > 1 else "video.mp4"
+                for candidate in candidates:
+                    media_url = candidate.get("url") or video.get("url")
+                    if not media_url:
+                        continue
+                    try:
+                        downloaded = await stream_to_file(
+                            self.client, media_url, destination / filename, self.config
+                        )
+                        output.append(downloaded)
+                        break
+                    except DownloadError as exc:
+                        if "too large to send" in str(exc):
+                            continue
+                        raise
         if photos:
-            output: list[DownloadedMedia] = []
             for index, photo in enumerate(photos):
                 media_url = photo.get("url")
                 if media_url:
@@ -429,8 +523,13 @@ class FxBlueskyClient:
                             self.config,
                         )
                     )
-            if output:
-                return DownloadResult(media=output, text=text)
+        if output:
+            return DownloadResult(media=output, text=text)
+        if had_video:
+            raise DownloadError(
+                f"This media is too large to send within {self.config.max_file_size_mb} MB. "
+                "Try `/dl <url> audio` to download only its audio."
+            )
         raise DownloadError("No downloadable media was found in that post.")
 
 
@@ -454,6 +553,7 @@ async def stream_to_file(
                 async for chunk in response.aiter_bytes(1024 * 256):
                     total += len(chunk)
                     if total > config.max_file_size:
+                        path.unlink(missing_ok=True)
                         raise DownloadError(
                             f"This media is too large to send within {config.max_file_size_mb} MB.{suggestion}"
                         )
@@ -463,7 +563,11 @@ async def stream_to_file(
         ).split(";", 1)[0]
         return DownloadedMedia(path, content_type)
     except httpx.HTTPError as exc:
+        path.unlink(missing_ok=True)
         raise DownloadError("The media could not be downloaded.") from exc
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 async def download_with_ytdlp(
