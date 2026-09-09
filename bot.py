@@ -7,17 +7,19 @@ import logging
 import re
 import shutil
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
 import yt_dlp
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from yt_dlp.utils import DownloadError as YtDlpDownloadError
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -46,7 +48,7 @@ class Settings(BaseSettings):
         env_file=".env", extra="ignore", case_sensitive=False
     )
 
-    bot_phone_number: str
+    bot_phone_number: str = ""
     bot_uuid: str | None = None
     signal_api_url: str = "http://signal-api:8080"
     webhook_path: str = "/webhook/signal"
@@ -59,6 +61,13 @@ class Settings(BaseSettings):
     shared_media_dir: Path = Path("/tmp/signal_shared_media")
     cookies_file: Path | None = Path("/app/cookies.txt")
     user_agent: str = "signal-media-bot/1.0"
+
+    @field_validator("bot_phone_number")
+    @classmethod
+    def validate_bot_phone_number(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("BOT_PHONE_NUMBER environment variable is required")
+        return v
 
     @property
     def max_file_size(self) -> int:
@@ -215,7 +224,7 @@ class DownloadError(Exception):
 
 
 def _format_size(
-    format_info: dict[str, Any], duration: float | None = None
+    format_info: Mapping[str, Any], duration: float | None = None
 ) -> int | None:
     size = format_info.get("filesize") or format_info.get("filesize_approx")
     if size:
@@ -229,7 +238,7 @@ def _format_size(
 
 
 def select_ytdlp_format(
-    info: dict[str, Any], config: Settings, options: DownloadOptions
+    info: Mapping[str, Any], config: Settings, options: DownloadOptions
 ) -> str:
     formats = [item for item in info.get("formats", []) if isinstance(item, dict)]
     duration = info.get("duration")
@@ -247,7 +256,7 @@ def select_ytdlp_format(
     codec_order = ("av01", "avc1", "vp9") if options.bestmini else ("av01", "avc1")
     audio_order = ("opus", "mp4a") if options.bestmini else ("mp4a", "opus")
 
-    def codec_rank(item: dict[str, Any], codecs: tuple[str, ...], field: str) -> int:
+    def codec_rank(item: Mapping[str, Any], codecs: tuple[str, ...], field: str) -> int:
         codec = str(item.get(field) or "")
         return next(
             (
@@ -456,7 +465,7 @@ async def download_with_ytdlp(
         options = DownloadOptions()
 
     def run() -> list[Path]:
-        ytdlp_options = {
+        ytdlp_options: dict[str, Any] = {
             "outtmpl": str(destination / "%(id)s.%(ext)s"),
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -473,12 +482,12 @@ async def download_with_ytdlp(
             shutil.copyfile(config.cookies_file, temporary_cookie_file)
             ytdlp_options["cookiefile"] = str(temporary_cookie_file)
         try:
-            with yt_dlp.YoutubeDL(ytdlp_options) as extractor:
+            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
                 info = extractor.extract_info(url, download=False)
             ytdlp_options["format"] = select_ytdlp_format(info, config, options)
-            with yt_dlp.YoutubeDL(ytdlp_options) as downloader:
+            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
                 downloader.download([url])
-        except (yt_dlp.utils.DownloadError, OSError) as exc:
+        except (YtDlpDownloadError, OSError) as exc:
             raise DownloadError(
                 "The link is private, unavailable, or could not be extracted."
             ) from exc
