@@ -30,6 +30,15 @@ X_STATUS_RE = re.compile(r"/(?:[^/]+/)?status/(\d+)", re.IGNORECASE)
 BSKY_HOSTS = {"bsky.app", "www.bsky.app", "fxbsky.app", "www.fxbsky.app"}
 BSKY_POST_RE = re.compile(r"/profile/([^/]+)/post/([^/?#]+)", re.IGNORECASE)
 GROUP_PREFIX = "group."
+AUDIO_CONTENT_TYPES = {
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".wav": "audio/wav",
+    ".weba": "audio/webm",
+}
 
 
 class Settings(BaseSettings):
@@ -224,23 +233,6 @@ def select_ytdlp_format(
 ) -> str:
     formats = [item for item in info.get("formats", []) if isinstance(item, dict)]
     duration = info.get("duration")
-    if options.audio_only:
-        audio = [item for item in formats if item.get("vcodec") == "none"]
-        audio.sort(key=lambda item: int(item.get("abr") or 0), reverse=True)
-        selected = next(
-            (
-                item
-                for item in audio
-                if (size := _format_size(item, duration)) is not None
-                and size <= config.max_file_size
-            ),
-            None,
-        )
-        if not selected:
-            raise DownloadError(
-                f"No audio format fits within {config.max_file_size_mb} MB."
-            )
-        return str(selected["format_id"])
 
     video = [
         item
@@ -251,7 +243,7 @@ def select_ytdlp_format(
             or int(item.get("height") or 0) <= options.max_height
         )
     ]
-    audio = [item for item in formats if item.get("vcodec") == "none"]
+    audio = [item for item in formats if item.get("vcodec") in (None, "none")]
     codec_order = ("av01", "avc1", "vp9") if options.bestmini else ("av01", "avc1")
     audio_order = ("opus", "mp4a") if options.bestmini else ("mp4a", "opus")
 
@@ -266,16 +258,41 @@ def select_ytdlp_format(
             len(codecs),
         )
 
+    audio.sort(
+        key=lambda item: (
+            -int(item.get("abr") or item.get("tbr") or 0),
+            codec_rank(item, audio_order, "acodec"),
+        )
+    )
+
+    if options.audio_only or (not video and audio):
+        selected = next(
+            (
+                item
+                for item in audio
+                if (size := _format_size(item, duration)) is not None
+                and size <= config.max_file_size
+            ),
+            None,
+        )
+        if not selected:
+            selected = next(
+                (item for item in audio if _format_size(item, duration) is None),
+                None,
+            )
+        if not selected:
+            raise DownloadError(
+                f"This audio is too large to send within {config.max_file_size_mb} MB."
+            )
+        return str(selected["format_id"])
+
+    if not video:
+        raise DownloadError("No downloadable media was found at that link.")
+
     video.sort(
         key=lambda item: (
             -int(item.get("height") or 0),
             codec_rank(item, codec_order, "vcodec"),
-        )
-    )
-    audio.sort(
-        key=lambda item: (
-            -int(item.get("abr") or 0),
-            codec_rank(item, audio_order, "acodec"),
         )
     )
 
@@ -404,10 +421,13 @@ async def stream_to_file(
         async with client.stream("GET", url, follow_redirects=True) as response:
             response.raise_for_status()
             length = int(response.headers.get("content-length") or 0)
+            is_video = path.suffix.lower() == ".mp4"
+            suggestion = (
+                " Try `/dl <url> audio` to download only its audio." if is_video else ""
+            )
             if length > config.max_file_size:
                 raise DownloadError(
-                    f"This media is too large to send within {config.max_file_size_mb} MB. "
-                    "Try `/dl <url> audio` to download only its audio."
+                    f"This media is too large to send within {config.max_file_size_mb} MB.{suggestion}"
                 )
             total = 0
             with path.open("wb") as output:
@@ -415,8 +435,7 @@ async def stream_to_file(
                     total += len(chunk)
                     if total > config.max_file_size:
                         raise DownloadError(
-                            f"This media is too large to send within {config.max_file_size_mb} MB. "
-                            "Try `/dl <url> audio` to download only its audio."
+                            f"This media is too large to send within {config.max_file_size_mb} MB.{suggestion}"
                         )
                     output.write(chunk)
         content_type = response.headers.get(
@@ -482,6 +501,11 @@ async def download_with_ytdlp(
         raise DownloadError("No downloadable media was found at that link.")
     for path in paths:
         if path.stat().st_size > config.max_file_size:
+            is_audio = options.audio_only or path.suffix.lower() in AUDIO_CONTENT_TYPES
+            if is_audio:
+                raise DownloadError(
+                    f"This audio is too large to send within {config.max_file_size_mb} MB."
+                )
             raise DownloadError(
                 f"This media is too large to send within {config.max_file_size_mb} MB. "
                 "Try `/dl <url> audio` to download only its audio."
@@ -491,7 +515,9 @@ async def download_with_ytdlp(
             path,
             "video/mp4"
             if path.suffix.lower() == ".mp4"
-            else "application/octet-stream",
+            else AUDIO_CONTENT_TYPES.get(
+                path.suffix.lower(), "application/octet-stream"
+            ),
         )
         for path in paths
     ]
