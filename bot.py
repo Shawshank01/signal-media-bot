@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 import yt_dlp
@@ -31,6 +31,70 @@ X_HOSTS = {"x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitt
 X_STATUS_RE = re.compile(r"/(?:[^/]+/)?status/(\d+)", re.IGNORECASE)
 BSKY_HOSTS = {"bsky.app", "www.bsky.app", "fxbsky.app", "www.fxbsky.app"}
 BSKY_POST_RE = re.compile(r"/profile/([^/]+)/post/([^/?#]+)", re.IGNORECASE)
+INSTAGRAM_HOSTS = {"instagram.com", "www.instagram.com"}
+INSTAGRAM_RE = re.compile(r"^/(p|reel|reels|tv)/([^/?#]+)", re.IGNORECASE)
+TIKTOK_HOSTS = {
+    "tiktok.com",
+    "www.tiktok.com",
+    "m.tiktok.com",
+    "vm.tiktok.com",
+    "vt.tiktok.com",
+}
+TIKTOK_VIDEO_RE = re.compile(r"^(/@[^/]+/video/\d+)", re.IGNORECASE)
+REDDIT_HOSTS = {"reddit.com", "www.reddit.com", "old.reddit.com"}
+REDDIT_POST_RE = re.compile(r"^(/r/[^/]+/comments/[^/]+(?:/[^/]+)?)", re.IGNORECASE)
+
+TRACKING_QUERY_PARAMS = {
+    # Analytics & UTM
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "utm_name",
+    # Ad click IDs
+    "fbclid",
+    "gclid",
+    "gclsrc",
+    "dclid",
+    "msclkid",
+    "yclid",
+    # Social platforms tracking
+    "igsh",
+    "igshid",
+    "s",
+    "ref_src",
+    "ref_url",
+    "si",
+    "feature",
+    "pp",
+    "ab_channel",
+    "embeds_referring_euri",
+    "source_ve_path",
+    "_t",
+    "_r",
+    "_s",
+    "is_from_webapp",
+    "sender_device",
+    "sec_uid",
+    "share_app_id",
+    "ug_btm",
+    "rdt",
+    "share_id",
+    "ref",
+    "referrer",
+    "origin",
+    "context",
+    "spm_id_from",
+    "from_source",
+    "broadcast_type",
+    "mkt_tok",
+    "mc_cid",
+    "mc_eid",
+    "source",
+}
+TRACKING_PREFIXES = ("utm_", "ga_", "fb_", "wicked", "oly_")
 GROUP_PREFIX = "group."
 AUDIO_CONTENT_TYPES = {
     ".m4a": "audio/mp4",
@@ -225,9 +289,98 @@ def download_options(message: IncomingMessage) -> DownloadOptions:
     )
 
 
+def is_tracking_param(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in TRACKING_QUERY_PARAMS or any(
+        lowered.startswith(prefix) for prefix in TRACKING_PREFIXES
+    )
+
+
+def clean_source_url(url: str) -> str:
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return url.strip()
+
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return url.strip()
+
+    hostname = (parsed.hostname or "").lower()
+
+    # 1. X (Twitter)
+    if hostname in X_HOSTS:
+        match = X_STATUS_RE.search(parsed.path)
+        if match:
+            return f"https://x.com{match.group(0)}"
+        if parsed.path.startswith("/i/spaces/"):
+            return f"https://x.com{parsed.path.rstrip('/')}"
+
+    # 2. Bluesky
+    if hostname in BSKY_HOSTS:
+        match = BSKY_POST_RE.search(parsed.path)
+        if match:
+            handle, rkey = match.groups()
+            return f"https://bsky.app/profile/{handle}/post/{rkey}"
+
+    # 3. YouTube
+    if hostname in {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+    }:
+        query_dict = dict(parse_qsl(parsed.query, keep_blank_values=False))
+        if parsed.path == "/watch" and "v" in query_dict:
+            res = f"https://www.youtube.com/watch?v={query_dict['v']}"
+            if "t" in query_dict:
+                res += f"&t={query_dict['t']}"
+            return res
+        if parsed.path.startswith(("/shorts/", "/live/", "/embed/")):
+            clean_path = parsed.path.rstrip("/")
+            return f"https://www.youtube.com{clean_path}"
+    elif hostname == "youtu.be":
+        video_id = parsed.path.strip("/")
+        if video_id:
+            query_dict = dict(parse_qsl(parsed.query, keep_blank_values=False))
+            res = f"https://youtu.be/{video_id}"
+            if "t" in query_dict:
+                res += f"?t={query_dict['t']}"
+            return res
+
+    # 4. Instagram
+    if hostname in INSTAGRAM_HOSTS:
+        match = INSTAGRAM_RE.match(parsed.path)
+        if match:
+            media_type, shortcode = match.groups()
+            return f"https://www.instagram.com/{media_type.lower()}/{shortcode}/"
+
+    # 5. TikTok
+    if hostname in TIKTOK_HOSTS:
+        if hostname in {"vm.tiktok.com", "vt.tiktok.com"}:
+            return f"https://{parsed.netloc}{parsed.path.rstrip('/')}/"
+        match = TIKTOK_VIDEO_RE.match(parsed.path)
+        if match:
+            return f"https://www.tiktok.com{match.group(1)}"
+
+    # 6. Reddit
+    if hostname in REDDIT_HOSTS:
+        match = REDDIT_POST_RE.match(parsed.path)
+        if match:
+            return f"https://www.reddit.com{match.group(1)}/"
+
+    # 7. General fallback
+    qsl = parse_qsl(parsed.query, keep_blank_values=False)
+    cleaned_params = [(k, v) for k, v in qsl if not is_tracking_param(k)]
+    new_query = urlencode(cleaned_params)
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, "")
+    )
+
+
 def format_caption(text: str, url: str) -> str:
     cleaned = text.strip()
-    return f"{cleaned}\n\nSource: {url}" if cleaned else f"Source: {url}"
+    source_url = clean_source_url(url)
+    return f"{cleaned}\n\nSource: {source_url}" if cleaned else f"Source: {source_url}"
 
 
 class DownloadError(Exception):
@@ -348,7 +501,8 @@ class FxTwitterClient:
         match = X_STATUS_RE.search(urlparse(url).path)
         if not match:
             raise DownloadError("That X link is not a status post.")
-        api_url = f"{self.config.fxtwitter_api_url.rstrip('/')}/{urlparse(url).path.lstrip('/')}"
+        status_path = match.group(0).lstrip("/")
+        api_url = f"{self.config.fxtwitter_api_url.rstrip('/')}/{status_path}"
         response = await self.client.get(api_url)
         response.raise_for_status()
         data = response.json().get("tweet", {})
