@@ -281,6 +281,61 @@ def message_urls(message: IncomingMessage, settings: Settings) -> list[str]:
     return list(dict.fromkeys(urls))[: settings.max_urls_per_message]
 
 
+def is_help_request(message: IncomingMessage, settings: Settings) -> bool:
+    if extract_urls(message.text) or (
+        message.group_id and extract_urls(message.quote_text)
+    ):
+        return False
+
+    text = message.text.strip().lower()
+    help_words = {"help", "--help", "-h"}
+
+    if message.group_id:
+        native_mention = bool(settings.bot_uuid) and any(
+            str(item.get("uuid") or "") == settings.bot_uuid
+            for item in message.mentions
+        )
+        if native_mention:
+            tokens = text.split()
+            if any(t in help_words for t in tokens):
+                return True
+        for p in settings.prefixes:
+            if text == p or text.startswith(p + " "):
+                cmd = text[len(p) :].strip()
+                if cmd in help_words or not cmd:
+                    return True
+        return False
+
+    if text in help_words or text in {"/help", "!help"}:
+        return True
+    for p in settings.prefixes:
+        if text == p or text.startswith(p + " "):
+            cmd = text[len(p) :].strip()
+            if cmd in help_words or not cmd:
+                return True
+    return False
+
+
+def help_message_text(settings: Settings) -> str:
+    limit = settings.max_file_size_mb
+    return (
+        "🤖 Signal Media Bot Commands\n\n"
+        "In DMs: Send any link directly.\n"
+        "In Groups: Use /dl, !dl, or @mention the bot.\n\n"
+        "Options:\n"
+        f"• /dl <url> - Download highest quality video (up to {limit} MiB)\n"
+        "• /dl <url> audio - Audio only\n"
+        "• /dl <url> 720 | 480 | 360 - Limit max video resolution\n"
+        "• /dl <url> lang:<code> - Select audio language (e.g. lang:de, lang:jp)\n"
+        "• /dl <url> audio lang:<code> - Audio only in chosen language\n"
+        "• /dl <url> track:<id> - Select specific audio track ID\n"
+        "• /dl <url> info - Inspect resolutions & audio tracks\n"
+        "• /dl <url> bestmini - Best resolution with minimal file size (may not play on older devices/iOS)\n\n"
+        "📖 Full documentation:\n"
+        "https://github.com/Shawshank01/signal-media-bot#signal-media-bot"
+    )
+
+
 def download_options(message: IncomingMessage) -> DownloadOptions:
     command_text = URL_RE.sub(" ", message.text.lower())
     tokens = set(
@@ -1043,10 +1098,17 @@ async def extract_media_info(url: str, config: Settings) -> str:
 async def process_message(
     message: IncomingMessage, config: Settings, client: httpx.AsyncClient
 ) -> None:
+    signal = SignalClient(client, config)
+    if is_help_request(message, config):
+        try:
+            await signal.send(help_message_text(config), message)
+        except (httpx.HTTPError, OSError):
+            log.exception("Failed to send help response")
+        return
+
     urls = message_urls(message, config)
     if not urls:
         return
-    signal = SignalClient(client, config)
     fx = FxTwitterClient(client, config)
     bsky = FxBlueskyClient(client, config)
     opts = download_options(message)

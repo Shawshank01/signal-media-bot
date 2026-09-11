@@ -146,8 +146,10 @@ Optional command arguments can force audio-only output, cap video resolution, se
 /dl <url> audio lang:<code>
 /dl <url> track:<id>
 /dl <url> info
+/dl help
 ```
 
+- **Help (`help`)**: Send `/dl help` (or `!dl help`, `@bot help`, or `help` in DMs) to display a quick command cheatsheet.
 - **Audio Track Selection**: On videos with multiple dubs/audio tracks (e.g. YouTube multi-language videos), use `lang:<code>` (e.g., `lang:de`, `lang:jp`) or `track:<id>` (e.g., `track:140-4`). By default, the bot automatically selects the original/default audio track and avoids compressed DRC tracks.
 - **Inspect Media (`info`)**: Use `/dl <url> info` to view available resolutions and audio tracks without downloading.
 
