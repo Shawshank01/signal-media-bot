@@ -43,6 +43,13 @@ TIKTOK_HOSTS = {
 TIKTOK_VIDEO_RE = re.compile(r"^(/@[^/]+/video/\d+)", re.IGNORECASE)
 REDDIT_HOSTS = {"reddit.com", "www.reddit.com", "old.reddit.com"}
 REDDIT_POST_RE = re.compile(r"^(/r/[^/]+/comments/[^/]+(?:/[^/]+)?)", re.IGNORECASE)
+YOUTUBE_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+}
 
 TRACKING_QUERY_PARAMS = {
     # Analytics & UTM
@@ -247,6 +254,15 @@ def is_bsky_url(url: str) -> bool:
         parsed.hostname
         and parsed.hostname.lower() in BSKY_HOSTS
         and BSKY_POST_RE.search(parsed.path)
+    )
+
+
+def is_youtube_url(url: str) -> bool:
+    hostname = (urlparse(url).hostname or "").lower()
+    return (
+        hostname == "youtube.com"
+        or hostname.endswith(".youtube.com")
+        or hostname in {"youtu.be", "www.youtu.be"}
     )
 
 
@@ -850,6 +866,49 @@ async def stream_to_file(
         raise
 
 
+def format_ytdlp_error(exc: Exception | None, url: str, config: Settings) -> str:
+    if not is_youtube_url(url):
+        return "The link is private, unavailable, or could not be extracted."
+
+    err_msg = str(exc).lower() if exc else ""
+    has_cookies = bool(config.cookies_file and config.cookies_file.is_file())
+
+    if "private video" in err_msg:
+        return "This YouTube video is private."
+    if "members-only" in err_msg or "join this channel" in err_msg:
+        return "This YouTube video is members-only and cannot be downloaded without an authorized account."
+    if "video unavailable" in err_msg:
+        return "This YouTube video is unavailable or has been removed."
+
+    bot_or_login_hints = (
+        "sign in to confirm",
+        "confirm you're not a bot",
+        "confirm your age",
+        "bot",
+        "login required",
+        "cookies",
+        "429",
+        "too many requests",
+    )
+    if any(hint in err_msg for hint in bot_or_login_hints):
+        if not has_cookies:
+            return (
+                "YouTube blocked this request (bot/login verification required). "
+                "Importing a cookies.txt file on the bot host can resolve this."
+            )
+        return (
+            "YouTube blocked this request. The bot's YouTube cookies may have expired."
+        )
+
+    if not has_cookies:
+        return (
+            "This YouTube video could not be extracted. "
+            "YouTube frequently blocks requests from servers, importing a cookies.txt file on the bot host can resolve this."
+        )
+
+    return "This YouTube video is unavailable or could not be extracted."
+
+
 async def download_with_ytdlp(
     url: str,
     destination: Path,
@@ -881,9 +940,7 @@ async def download_with_ytdlp(
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
                 info = extractor.extract_info(url, download=False)
             if not isinstance(info, dict):
-                raise DownloadError(
-                    "The link is private, unavailable, or could not be extracted."
-                )
+                raise DownloadError(format_ytdlp_error(None, url, config))
             format_spec = select_ytdlp_format(info, config, options)
             ytdlp_options["format"] = format_spec
             title = str(info.get("title") or "").strip()
@@ -922,9 +979,7 @@ async def download_with_ytdlp(
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
                 downloader.download([url])
         except (YtDlpDownloadError, OSError) as exc:
-            raise DownloadError(
-                "The link is private, unavailable, or could not be extracted."
-            ) from exc
+            raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
         finally:
             if temporary_cookie_file:
                 temporary_cookie_file.unlink(missing_ok=True)
@@ -1030,16 +1085,12 @@ async def extract_media_info(url: str, config: Settings) -> str:
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
                 info = extractor.extract_info(url, download=False)
         except (YtDlpDownloadError, OSError) as exc:
-            raise DownloadError(
-                "The link is private, unavailable, or could not be extracted."
-            ) from exc
+            raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
         if not isinstance(info, dict):
-            raise DownloadError(
-                "The link is private, unavailable, or could not be extracted."
-            )
+            raise DownloadError(format_ytdlp_error(None, url, config))
 
         title = str(info.get("title") or "Media").strip()
         raw_formats = info.get("formats") or []
