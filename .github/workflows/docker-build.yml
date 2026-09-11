@@ -55,7 +55,6 @@ jobs:
         file: ./Dockerfile
         platforms: ${{ matrix.platform }}
         labels: ${{ steps.meta.outputs.labels }}
-        provenance: false
         outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/signal-media-bot,push-by-digest=true,name-canonical=true,push=true
 
     - name: Export digest
