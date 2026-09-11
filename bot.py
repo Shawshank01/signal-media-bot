@@ -173,6 +173,9 @@ class DownloadOptions:
     audio_only: bool = False
     max_height: int | None = None
     bestmini: bool = False
+    audio_lang: str | None = None
+    audio_track: str | None = None
+    info_only: bool = False
 
 
 def _first_dict(value: Any) -> dict[str, Any] | None:
@@ -280,12 +283,25 @@ def message_urls(message: IncomingMessage, settings: Settings) -> list[str]:
 
 def download_options(message: IncomingMessage) -> DownloadOptions:
     command_text = URL_RE.sub(" ", message.text.lower())
-    tokens = set(re.findall(r"\b(audio|bestmini|360|480|720|1080)\b", command_text))
+    tokens = set(
+        re.findall(r"\b(audio|bestmini|info|360|480|720|1080)\b", command_text)
+    )
     heights = [int(token) for token in tokens if token.isdigit()]
+    lang_match = re.search(
+        r"\b(?:lang|audio|language)[:=]([a-zA-Z0-9_\-]+)\b", command_text
+    )
+    track_match = re.search(r"\btrack[:=]([a-zA-Z0-9_\-]+)\b", command_text)
+
+    audio_lang = lang_match.group(1).lower() if lang_match else None
+    audio_track = track_match.group(1) if track_match else None
+
     return DownloadOptions(
         audio_only="audio" in tokens,
         max_height=max(heights) if heights else None,
         bestmini="bestmini" in tokens,
+        audio_lang=audio_lang,
+        audio_track=audio_track,
+        info_only="info" in tokens,
     )
 
 
@@ -404,7 +420,8 @@ def _format_size(
 def select_ytdlp_format(
     info: Mapping[str, Any], config: Settings, options: DownloadOptions
 ) -> str:
-    formats = [item for item in info.get("formats", []) if isinstance(item, dict)]
+    raw_formats = info.get("formats") or []
+    formats = [item for item in raw_formats if isinstance(item, dict)]
     duration = info.get("duration")
 
     video = [
@@ -431,12 +448,63 @@ def select_ytdlp_format(
             len(codecs),
         )
 
-    audio.sort(
-        key=lambda item: (
-            -int(item.get("abr") or item.get("tbr") or 0),
-            codec_rank(item, audio_order, "acodec"),
-        )
-    )
+    if options.audio_track:
+        matching_audio = [
+            item
+            for item in audio
+            if str(item.get("format_id") or "").lower() == options.audio_track.lower()
+        ]
+        if not matching_audio:
+            available_ids = [
+                str(item.get("format_id")) for item in audio if item.get("format_id")
+            ]
+            raise DownloadError(
+                f"Audio track ID '{options.audio_track}' was not found. "
+                f"Available track IDs: {', '.join(available_ids[:10])}"
+            )
+        audio = matching_audio
+    elif options.audio_lang:
+        req = options.audio_lang.strip().lower()
+        matching_audio = [
+            item
+            for item in audio
+            if req == str(item.get("language") or "").lower()
+            or str(item.get("language") or "").lower().startswith(req + "-")
+            or req in str(item.get("format_note") or "").lower()
+            or req in str(item.get("language") or "").lower()
+        ]
+        if not matching_audio:
+            available_langs: list[str] = []
+            for item in audio:
+                lang = str(item.get("language") or "")
+                note = str(item.get("format_note") or "")
+                desc = lang
+                if note and desc:
+                    desc = f"{lang} ({note})"
+                elif note:
+                    desc = note
+                if desc and desc not in available_langs:
+                    available_langs.append(desc)
+            langs_str = (
+                ", ".join(available_langs) if available_langs else "None detected"
+            )
+            raise DownloadError(
+                f"Audio language '{options.audio_lang}' not found at that link. "
+                f"Available audio tracks: {langs_str}."
+            )
+        audio = matching_audio
+
+    def audio_rank(item: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
+        note = str(item.get("format_note") or "").lower()
+        fid = str(item.get("format_id") or "").lower()
+        is_drc = 1 if ("drc" in fid or "drc" in note.split()) else 0
+        pref = int(item.get("language_preference") or 0)
+        is_default = 1 if ("(default)" in note or "original" in note) else 0
+        bitrate = int(item.get("abr") or item.get("tbr") or 0)
+        codec = codec_rank(item, audio_order, "acodec")
+        return (is_drc, -pref, -is_default, -bitrate, codec)
+
+    audio.sort(key=audio_rank)
 
     if options.audio_only or (not video and audio):
         selected = next(
@@ -469,8 +537,11 @@ def select_ytdlp_format(
         )
     )
 
+    custom_audio = bool(options.audio_lang or options.audio_track)
     for video_format in video:
         if video_format.get("acodec") not in (None, "none"):
+            if custom_audio:
+                continue
             size = _format_size(video_format, duration)
             if size is not None and size <= config.max_file_size:
                 return str(video_format["format_id"])
@@ -754,8 +825,45 @@ async def download_with_ytdlp(
         try:
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
                 info = extractor.extract_info(url, download=False)
-            ytdlp_options["format"] = select_ytdlp_format(info, config, options)
+            if not isinstance(info, dict):
+                raise DownloadError(
+                    "The link is private, unavailable, or could not be extracted."
+                )
+            format_spec = select_ytdlp_format(info, config, options)
+            ytdlp_options["format"] = format_spec
             title = str(info.get("title") or "").strip()
+
+            raw_formats = info.get("formats") or []
+            audio_formats = [
+                f
+                for f in raw_formats
+                if isinstance(f, dict)
+                and f.get("vcodec") in (None, "none")
+                and f.get("acodec") not in (None, "none")
+            ]
+            distinct_langs = sorted(
+                {
+                    str(f.get("language"))
+                    for f in audio_formats
+                    if f.get("language") and str(f.get("language")) != "None"
+                }
+            )
+            if len(distinct_langs) > 1:
+                chosen_lang = options.audio_lang or next(
+                    (
+                        str(f.get("language"))
+                        for f in audio_formats
+                        if "(default)" in str(f.get("format_note") or "")
+                        or int(f.get("language_preference") or 0) > 0
+                    ),
+                    distinct_langs[0],
+                )
+                other_langs = [l for l in distinct_langs if l != chosen_lang]
+                if other_langs:
+                    title += f"\n\n[Audio: {chosen_lang} | Other tracks: {', '.join(other_langs)} (use lang:<code>)]"
+                else:
+                    title += f"\n\n[Audio: {chosen_lang}]"
+
             with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
                 downloader.download([url])
         except (YtDlpDownloadError, OSError) as exc:
@@ -848,6 +956,90 @@ async def encode_attachment(media: DownloadedMedia) -> str:
     return f"data:{media.content_type};filename={media.path.name};base64,{encoded}"
 
 
+async def extract_media_info(url: str, config: Settings) -> str:
+    def run() -> str:
+        temp_dir = Path(tempfile.mkdtemp(prefix="ytdlp-info-"))
+        ytdlp_options: dict[str, Any] = {
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": config.download_timeout_seconds,
+            "js_runtimes": {"deno": {}},
+            "remote_components": ["ejs:github"],
+        }
+        if config.cookies_file and config.cookies_file.is_file():
+            temporary_cookie_file = temp_dir / ".cookies.txt"
+            shutil.copyfile(config.cookies_file, temporary_cookie_file)
+            ytdlp_options["cookiefile"] = str(temporary_cookie_file)
+        try:
+            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
+                info = extractor.extract_info(url, download=False)
+        except (YtDlpDownloadError, OSError) as exc:
+            raise DownloadError(
+                "The link is private, unavailable, or could not be extracted."
+            ) from exc
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if not isinstance(info, dict):
+            raise DownloadError(
+                "The link is private, unavailable, or could not be extracted."
+            )
+
+        title = str(info.get("title") or "Media").strip()
+        raw_formats = info.get("formats") or []
+        formats = [f for f in raw_formats if isinstance(f, dict)]
+
+        heights = sorted(
+            {
+                int(f["height"])
+                for f in formats
+                if f.get("vcodec") not in (None, "none") and f.get("height")
+            },
+            reverse=True,
+        )
+
+        audio_formats = [
+            f
+            for f in formats
+            if f.get("vcodec") in (None, "none")
+            and f.get("acodec") not in (None, "none")
+        ]
+        tracks: dict[str, str] = {}
+        for af in audio_formats:
+            lang = str(af.get("language") or "")
+            note = str(af.get("format_note") or "")
+            fid = str(af.get("format_id") or "")
+            if not lang and not note:
+                continue
+            key = lang or fid
+            if key not in tracks:
+                desc = note if note else f"ID {fid}"
+                tracks[key] = desc
+
+        lines = [f"🎬 {title}"]
+        if heights:
+            lines.append(f"\nResolutions: {', '.join(f'{h}p' for h in heights)}")
+        if tracks:
+            lines.append("\nAvailable audio tracks:")
+            for key, desc in tracks.items():
+                lines.append(f"• {key}: {desc}")
+            first_lang = next(iter(tracks.keys()))
+            lines.append("\nTo download with specific audio:")
+            lines.append(f"/dl <url> lang:{first_lang}")
+            lines.append(f"/dl <url> audio lang:{first_lang}")
+        else:
+            lines.append("\nNo separate audio tracks detected.")
+        return "\n".join(lines)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(run), config.download_timeout_seconds
+        )
+    except asyncio.TimeoutError as exc:
+        raise DownloadError("Media inspection timed out.") from exc
+
+
 async def process_message(
     message: IncomingMessage, config: Settings, client: httpx.AsyncClient
 ) -> None:
@@ -857,7 +1049,28 @@ async def process_message(
     signal = SignalClient(client, config)
     fx = FxTwitterClient(client, config)
     bsky = FxBlueskyClient(client, config)
+    opts = download_options(message)
     for url in urls:
+        if opts.info_only:
+            try:
+                if is_x_url(url) or is_bsky_url(url):
+                    await signal.send(
+                        "Info command is only supported for video platforms like YouTube.",
+                        message,
+                    )
+                else:
+                    info_text = await extract_media_info(url, config)
+                    await signal.send(info_text, message)
+            except DownloadError as exc:
+                log.info("Info extraction failed for %s: %s", url, exc)
+                await send_error(signal, str(exc), message)
+            except (httpx.HTTPError, OSError):
+                log.exception("Info extraction failed for %s", url)
+                await send_error(
+                    signal, "I could not inspect that media right now.", message
+                )
+            continue
+
         workdir = Path(
             tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir)
         )
@@ -868,9 +1081,7 @@ async def process_message(
             elif is_bsky_url(url):
                 result = await bsky.download(url, workdir)
             else:
-                result = await download_with_ytdlp(
-                    url, workdir, config, download_options(message)
-                )
+                result = await download_with_ytdlp(url, workdir, config, opts)
             caption = format_caption(result.text, url)
             await signal.send(caption, message, result.media)
         except DownloadError as exc:

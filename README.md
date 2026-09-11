@@ -134,7 +134,7 @@ In a group, use a command or mention:
 @<the bot's Signal account name> https://www.youtube.com/watch?v=...
 ```
 
-Optional command arguments can force audio-only output, cap video resolution, or allow codecs with wider compatibility tradeoffs:
+Optional command arguments can force audio-only output, cap video resolution, select specific audio languages/tracks, or inspect available streams:
 
 ```text
 /dl <url> audio
@@ -142,7 +142,14 @@ Optional command arguments can force audio-only output, cap video resolution, or
 /dl <url> 480
 /dl <url> 360
 /dl <url> bestmini
+/dl <url> lang:<code>
+/dl <url> audio lang:<code>
+/dl <url> track:<id>
+/dl <url> info
 ```
+
+- **Audio Track Selection**: On videos with multiple dubs/audio tracks (e.g. YouTube multi-language videos), use `lang:<code>` (e.g., `lang:de`, `lang:jp`) or `track:<id>` (e.g., `track:140-4`). By default, the bot automatically selects the original/default audio track and avoids compressed DRC tracks.
+- **Inspect Media (`info`)**: Use `/dl <url> info` to view available resolutions and audio tracks without downloading.
 
 Video downloads are selected as the highest available video and audio combination. If the video file is larger than 100 MB, it will step down through the available resolutions. If no video format fits, it explains how to request audio only.
 
