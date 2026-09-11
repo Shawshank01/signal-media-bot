@@ -48,7 +48,7 @@ docker compose up -d signal-api
 
 Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The `signal-api` container runs in JSON-RPC mode and does not serve a Swagger UI, refer to the [signal-cli-rest-api docs](https://github.com/bbernhard/signal-cli-rest-api) for available endpoints.
 
-### Link Existing Account
+### Link Existing Account (Recommended)
 
 Start the Signal API:
 
@@ -96,6 +96,12 @@ Set `BOT_UUID` to the UUID from the identity record whose `number` matches `BOT_
 
 ```dotenv
 BOT_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Restart the container if it is already running:
+
+```sh
+docker compose up -d signal-bot
 ```
 
 ## Start the Bot
