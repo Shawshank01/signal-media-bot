@@ -866,12 +866,25 @@ async def stream_to_file(
         raise
 
 
+def has_valid_cookies(config: Settings) -> bool:
+    if not (config.cookies_file and config.cookies_file.is_file()):
+        return False
+    try:
+        content = config.cookies_file.read_text(errors="ignore")
+        return any(
+            line.strip() and not line.strip().startswith("#")
+            for line in content.splitlines()
+        )
+    except OSError:
+        return False
+
+
 def format_ytdlp_error(exc: Exception | None, url: str, config: Settings) -> str:
     if not is_youtube_url(url):
         return "The link is private, unavailable, or could not be extracted."
 
     err_msg = str(exc).lower() if exc else ""
-    has_cookies = bool(config.cookies_file and config.cookies_file.is_file())
+    has_cookies = has_valid_cookies(config)
 
     if "private video" in err_msg:
         return "This YouTube video is private."
@@ -931,7 +944,7 @@ async def download_with_ytdlp(
             "remote_components": ["ejs:github"],
         }
         temporary_cookie_file: Path | None = None
-        if config.cookies_file and config.cookies_file.is_file():
+        if config.cookies_file and has_valid_cookies(config):
             temporary_cookie_file = destination / ".cookies.txt"
             shutil.copyfile(config.cookies_file, temporary_cookie_file)
             ytdlp_options["cookiefile"] = str(temporary_cookie_file)
@@ -1077,7 +1090,7 @@ async def extract_media_info(url: str, config: Settings) -> str:
             "js_runtimes": {"deno": {}},
             "remote_components": ["ejs:github"],
         }
-        if config.cookies_file and config.cookies_file.is_file():
+        if config.cookies_file and has_valid_cookies(config):
             temporary_cookie_file = temp_dir / ".cookies.txt"
             shutil.copyfile(config.cookies_file, temporary_cookie_file)
             ytdlp_options["cookiefile"] = str(temporary_cookie_file)
@@ -1217,6 +1230,12 @@ async def send_error(signal: SignalClient, text: str, message: IncomingMessage) 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings.shared_media_dir.mkdir(parents=True, exist_ok=True)
+    if settings.cookies_file and settings.cookies_file.is_dir():
+        log.warning(
+            "cookies_file (%s) is a directory, not a regular file! "
+            "If Docker created this directory automatically, remove it on the host and provide a regular cookies.txt file.",
+            settings.cookies_file,
+        )
     timeout = httpx.Timeout(settings.download_timeout_seconds, connect=15)
     async with httpx.AsyncClient(
         timeout=timeout, headers={"User-Agent": settings.user_agent}

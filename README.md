@@ -23,6 +23,7 @@ mkdir signal-media-bot && cd signal-media-bot
 curl -fsSLO https://raw.githubusercontent.com/Shawshank01/signal-media-bot/main/docker-compose.yml
 curl -fsSLO https://raw.githubusercontent.com/Shawshank01/signal-media-bot/main/.env.example
 cp .env.example .env
+touch cookies.txt
 ```
 
 Edit `.env`:
@@ -172,33 +173,20 @@ docker compose up -d signal-bot
 
 YouTube frequently blocks requests from VPS/datacenter IPs. To resolve this, you can provide an exported browser `cookies.txt`:
 
-1. Export cookies from your browser in Netscape format using an extension recomended by [yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
-2. Copy `cookies.txt` into the `signal-media-bot` directory on your VPS.
-3. Make the file readable by the bot container, while keeping it private from other users:
-
-   ```yaml
-   sudo chown root:10001 cookies.txt
-   sudo chmod 640 cookies.txt
-   ```
-
-4. Confirm the container can read the mounted file:
+1. Export cookies from your browser in Netscape format using an extension recommended by [yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp).
+2. Paste the exported cookies into `cookies.txt` in the `signal-media-bot` directory on your server.
+3. Restart the bot container:
 
    ```sh
-   sudo docker compose run --rm signal-bot test -r /app/cookies.txt
+   docker compose restart signal-bot
    ```
 
-5. Test YouTube extraction. The command copies the read-only mount to a temporary writable file because yt-dlp may update its cookie jar:
+*(Optional verification)* Confirm YouTube extraction works with your cookies:
 
-   ```sh
-   sudo docker compose run --rm signal-bot sh -c \
-     'cp /app/cookies.txt /tmp/cookies.txt && yt-dlp --cookies /tmp/cookies.txt --remote-components ejs:github --simulate --no-playlist "https://www.youtube.com/watch?v=VIDEO_ID"'
-   ```
-
-6. Restart the bot container:
-
-   ```sh
-   docker compose up -d signal-bot
-   ```
+```sh
+docker compose run --rm signal-bot sh -c \
+  'cp /app/cookies.txt /tmp/cookies.txt && yt-dlp --cookies /tmp/cookies.txt --remote-components ejs:github --simulate --no-playlist "https://www.youtube.com/watch?v=dQw4w9WgXcQ"'
+```
 
 ## Credits
 
