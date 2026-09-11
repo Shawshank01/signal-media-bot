@@ -434,7 +434,7 @@ def select_ytdlp_format(
         )
     ]
     audio = [item for item in formats if item.get("vcodec") in (None, "none")]
-    codec_order = ("av01", "avc1", "vp9") if options.bestmini else ("av01", "avc1")
+    codec_order = ("av01", "vp9", "avc1") if options.bestmini else ("av01", "avc1")
     audio_order = ("opus", "mp4a") if options.bestmini else ("mp4a", "opus")
 
     def codec_rank(item: Mapping[str, Any], codecs: tuple[str, ...], field: str) -> int:
