@@ -6,7 +6,6 @@ on:
     - main
     paths:
     - "README.md"
-    - ".github/workflows/dockerhub-description.yml"
   workflow_dispatch:
 
 
