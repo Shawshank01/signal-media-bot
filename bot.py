@@ -506,7 +506,7 @@ def select_ytdlp_format(
     ]
     audio = [item for item in formats if item.get("vcodec") in (None, "none")]
     codec_order = ("av01", "vp9", "avc1") if options.bestmini else ("av01", "avc1")
-    audio_order = ("opus", "mp4a") if options.bestmini else ("mp4a", "opus")
+    audio_order = ("mp4a", "opus")
 
     def codec_rank(item: Mapping[str, Any], codecs: tuple[str, ...], field: str) -> int:
         codec = str(item.get(field) or "")
@@ -573,7 +573,7 @@ def select_ytdlp_format(
         is_default = 1 if ("(default)" in note or "original" in note) else 0
         bitrate = int(item.get("abr") or item.get("tbr") or 0)
         codec = codec_rank(item, audio_order, "acodec")
-        return (is_drc, -pref, -is_default, -bitrate, codec)
+        return (is_drc, -pref, -is_default, codec, -bitrate)
 
     audio.sort(key=audio_rank)
 
