@@ -1009,7 +1009,7 @@ async def download_with_ytdlp(
         paths, title = await asyncio.wait_for(
             asyncio.to_thread(run), config.download_timeout_seconds
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise DownloadError("The download timed out.") from exc
     if not paths:
         raise DownloadError("No downloadable media was found at that link.")
@@ -1155,7 +1155,7 @@ async def extract_media_info(url: str, config: Settings) -> str:
         return await asyncio.wait_for(
             asyncio.to_thread(run), config.download_timeout_seconds
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise DownloadError("Media inspection timed out.") from exc
 
 
