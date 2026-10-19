@@ -7,7 +7,7 @@ import logging
 import re
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,6 +140,15 @@ class Settings(BaseSettings):
             raise ValueError("BOT_PHONE_NUMBER environment variable is required")
         return v
 
+    @field_validator(
+        "max_file_size_mb", "max_urls_per_message", "download_timeout_seconds"
+    )
+    @classmethod
+    def validate_positive_settings(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("This setting must be greater than zero")
+        return v
+
     @property
     def max_file_size(self) -> int:
         return self.max_file_size_mb * 1024 * 1024
@@ -213,7 +222,9 @@ def parse_message(payload: dict[str, Any]) -> IncomingMessage | None:
     envelope = unwrap_envelope(payload)
     if not envelope:
         return None
-    data = envelope.get("dataMessage") or {}
+    data = envelope.get("dataMessage")
+    if not isinstance(data, dict):
+        return None
     sender = str(
         envelope.get("sourceNumber")
         or envelope.get("source")
@@ -222,13 +233,20 @@ def parse_message(payload: dict[str, Any]) -> IncomingMessage | None:
     )
     if not data.get("message") and not data.get("quote"):
         return None
-    group = data.get("groupInfo") or {}
-    quote = data.get("quote") or {}
+    group = data.get("groupInfo")
+    if not isinstance(group, dict):
+        group = {}
+    quote = data.get("quote")
+    if not isinstance(quote, dict):
+        quote = {}
+    mentions = data.get("mentions")
+    if not isinstance(mentions, list):
+        mentions = []
     return IncomingMessage(
         text=str(data.get("message") or ""),
         sender=sender,
         group_id=str(group.get("groupId")) if group.get("groupId") else None,
-        mentions=tuple(x for x in data.get("mentions", []) if isinstance(x, dict)),
+        mentions=tuple(x for x in mentions if isinstance(x, dict)),
         quote_text=str(quote.get("text") or ""),
     )
 
@@ -271,7 +289,7 @@ def signal_recipient(message: IncomingMessage) -> str:
         return message.sender
     if message.group_id.startswith(GROUP_PREFIX):
         return message.group_id
-    encoded_group_id = base64.b64encode(message.group_id.encode("ascii")).decode(
+    encoded_group_id = base64.b64encode(message.group_id.encode("utf-8")).decode(
         "ascii"
     )
     return f"{GROUP_PREFIX}{encoded_group_id}"
@@ -474,16 +492,32 @@ class DownloadError(Exception):
     pass
 
 
+class DeferredCleanupTimeoutError(DownloadError):
+    pass
+
+
+def _metadata_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _format_size(
     format_info: Mapping[str, Any], duration: float | None = None
 ) -> int | None:
     size = format_info.get("filesize") or format_info.get("filesize_approx")
     if size:
-        return int(size)
+        parsed_size = _metadata_int(size, -1)
+        if parsed_size >= 0:
+            return parsed_size
     format_duration = format_info.get("duration") or duration
     bitrate = format_info.get("tbr") or format_info.get("abr")
     if bitrate and format_duration:
-        estimated_size = int(float(bitrate) * 1000 / 8 * float(format_duration))
+        try:
+            estimated_size = int(float(bitrate) * 1000 / 8 * float(format_duration))
+        except (TypeError, ValueError, OverflowError):
+            return None
         return int(estimated_size * 1.15)
     return None
 
@@ -501,7 +535,7 @@ def select_ytdlp_format(
         if item.get("vcodec") not in (None, "none")
         and (
             options.max_height is None
-            or int(item.get("height") or 0) <= options.max_height
+            or _metadata_int(item.get("height")) <= options.max_height
         )
     ]
     audio = [item for item in formats if item.get("vcodec") in (None, "none")]
@@ -569,9 +603,9 @@ def select_ytdlp_format(
         note = str(item.get("format_note") or "").lower()
         fid = str(item.get("format_id") or "").lower()
         is_drc = 1 if ("drc" in fid or "drc" in note.split()) else 0
-        pref = int(item.get("language_preference") or 0)
+        pref = _metadata_int(item.get("language_preference"))
         is_default = 1 if ("(default)" in note or "original" in note) else 0
-        bitrate = int(item.get("abr") or item.get("tbr") or 0)
+        bitrate = _metadata_int(item.get("abr") or item.get("tbr"))
         codec = codec_rank(item, audio_order, "acodec")
         return (is_drc, -pref, -is_default, codec, -bitrate)
 
@@ -603,7 +637,7 @@ def select_ytdlp_format(
 
     video.sort(
         key=lambda item: (
-            -int(item.get("height") or 0),
+            -_metadata_int(item.get("height")),
             codec_rank(item, codec_order, "vcodec"),
         )
     )
@@ -647,14 +681,24 @@ class FxTwitterClient:
         api_url = f"{self.config.fxtwitter_api_url.rstrip('/')}/{status_path}"
         response = await self.client.get(api_url)
         response.raise_for_status()
-        data = response.json().get("tweet", {})
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise DownloadError("The X media service returned invalid JSON.") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("tweet"), dict):
+            raise DownloadError("The X media service returned an invalid response.")
+        data = data["tweet"]
         text = str(data.get("text") or "").strip()
         media = data.get("media") or {}
+        if not isinstance(media, dict):
+            raise DownloadError("The X media service returned invalid media data.")
 
         output: list[DownloadedMedia] = []
         had_video = False
 
-        all_items = media.get("all") or []
+        all_items = [
+            item for item in (media.get("all") or []) if isinstance(item, dict)
+        ]
         if all_items:
             v_idx = 0
             p_idx = 0
@@ -667,7 +711,7 @@ class FxTwitterClient:
                     ]
                     candidates = sorted(
                         variants or [item],
-                        key=lambda v: int(v.get("bitrate") or 0),
+                        key=lambda v: _metadata_int(v.get("bitrate")),
                         reverse=True,
                     )
                     filename = (
@@ -705,8 +749,12 @@ class FxTwitterClient:
                             )
                         )
         else:
-            videos = media.get("videos") or []
-            photos = media.get("photos") or []
+            videos = [
+                item for item in (media.get("videos") or []) if isinstance(item, dict)
+            ]
+            photos = [
+                item for item in (media.get("photos") or []) if isinstance(item, dict)
+            ]
             if videos:
                 had_video = True
                 for v_idx, video in enumerate(videos):
@@ -715,7 +763,7 @@ class FxTwitterClient:
                     ]
                     candidates = sorted(
                         variants or [video],
-                        key=lambda v: int(v.get("bitrate") or 0),
+                        key=lambda v: _metadata_int(v.get("bitrate")),
                         reverse=True,
                     )
                     filename = f"video-{v_idx}.mp4" if len(videos) > 1 else "video.mp4"
@@ -772,11 +820,31 @@ class FxBlueskyClient:
         api_url = f"{self.config.fxbsky_api_url.rstrip('/')}/2/status/{handle}/{rkey}"
         response = await self.client.get(api_url)
         response.raise_for_status()
-        data = response.json().get("status", {})
+        try:
+            response_data = response.json()
+        except ValueError as exc:
+            raise DownloadError(
+                "The Bluesky media service returned invalid JSON."
+            ) from exc
+        if not isinstance(response_data, dict) or not isinstance(
+            response_data.get("status"), dict
+        ):
+            raise DownloadError(
+                "The Bluesky media service returned an invalid response."
+            )
+        data = response_data["status"]
         text = str(data.get("text") or "").strip()
         media = data.get("media") or {}
-        videos = media.get("videos") or []
-        photos = media.get("photos") or []
+        if not isinstance(media, dict):
+            raise DownloadError(
+                "The Bluesky media service returned invalid media data."
+            )
+        videos = [
+            item for item in (media.get("videos") or []) if isinstance(item, dict)
+        ]
+        photos = [
+            item for item in (media.get("photos") or []) if isinstance(item, dict)
+        ]
         output: list[DownloadedMedia] = []
         had_video = False
         if videos:
@@ -785,11 +853,11 @@ class FxBlueskyClient:
                 formats = [
                     item
                     for item in video.get("formats", [])
-                    if item.get("container") == "mp4"
+                    if isinstance(item, dict) and item.get("container") == "mp4"
                 ]
                 candidates = sorted(
                     formats or [video],
-                    key=lambda item: int(item.get("bitrate") or 0),
+                    key=lambda item: _metadata_int(item.get("bitrate")),
                     reverse=True,
                 )
                 filename = f"video-{v_idx}.mp4" if len(videos) > 1 else "video.mp4"
@@ -835,7 +903,7 @@ async def stream_to_file(
     try:
         async with client.stream("GET", url, follow_redirects=True) as response:
             response.raise_for_status()
-            length = int(response.headers.get("content-length") or 0)
+            length = _metadata_int(response.headers.get("content-length"))
             is_video = path.suffix.lower() == ".mp4"
             suggestion = (
                 " Try `/dl <url> audio` to download only its audio." if is_video else ""
@@ -979,7 +1047,7 @@ async def download_with_ytdlp(
                         str(f.get("language"))
                         for f in audio_formats
                         if "(default)" in str(f.get("format_note") or "")
-                        or int(f.get("language_preference") or 0) > 0
+                        or _metadata_int(f.get("language_preference")) > 0
                     ),
                     distinct_langs[0],
                 )
@@ -1006,11 +1074,13 @@ async def download_with_ytdlp(
         )
 
     try:
-        paths, title = await asyncio.wait_for(
-            asyncio.to_thread(run), config.download_timeout_seconds
+        paths, title = await _run_thread_with_timeout(
+            run,
+            config.download_timeout_seconds,
+            on_timeout=lambda: shutil.rmtree(destination, ignore_errors=True),
         )
     except TimeoutError as exc:
-        raise DownloadError("The download timed out.") from exc
+        raise DeferredCleanupTimeoutError("The download timed out.") from exc
     if not paths:
         raise DownloadError("No downloadable media was found at that link.")
     for path in paths:
@@ -1057,9 +1127,10 @@ class SignalClient:
         }
         payload["recipients"] = [signal_recipient(destination)]
         if media:
-            payload["base64_attachments"] = await asyncio.gather(
-                *(encode_attachment(item) for item in media)
-            )
+            attachments = []
+            for item in media:
+                attachments.append(await encode_attachment(item))
+            payload["base64_attachments"] = attachments
         response = await self.client.post(
             f"{self.config.signal_api_url.rstrip('/')}/v2/send", json=payload
         )
@@ -1077,6 +1148,28 @@ async def encode_attachment(media: DownloadedMedia) -> str:
         lambda: base64.b64encode(media.path.read_bytes()).decode("ascii")
     )
     return f"data:{media.content_type};filename={media.path.name};base64,{encoded}"
+
+
+async def _run_thread_with_timeout(
+    func: Callable[[], Any],
+    timeout: int,
+    on_timeout: Callable[[], None] | None = None,
+) -> Any:
+    task = asyncio.create_task(asyncio.to_thread(func))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout)
+    except TimeoutError:
+
+        def consume_result(completed_task: asyncio.Task[Any]) -> None:
+            try:
+                completed_task.exception()
+            except asyncio.CancelledError:
+                pass
+            if on_timeout:
+                on_timeout()
+
+        task.add_done_callback(consume_result)
+        raise
 
 
 async def extract_media_info(url: str, config: Settings) -> str:
@@ -1111,7 +1204,7 @@ async def extract_media_info(url: str, config: Settings) -> str:
 
         heights = sorted(
             {
-                int(f["height"])
+                _metadata_int(f.get("height"))
                 for f in formats
                 if f.get("vcodec") not in (None, "none") and f.get("height")
             },
@@ -1152,9 +1245,7 @@ async def extract_media_info(url: str, config: Settings) -> str:
         return "\n".join(lines)
 
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(run), config.download_timeout_seconds
-        )
+        return await _run_thread_with_timeout(run, config.download_timeout_seconds)
     except TimeoutError as exc:
         raise DownloadError("Media inspection timed out.") from exc
 
@@ -1197,10 +1288,12 @@ async def process_message(
                 )
             continue
 
-        workdir = Path(
-            tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir)
-        )
+        workdir: Path | None = None
+        cleanup_deferred = False
         try:
+            workdir = Path(
+                tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir)
+            )
             await signal.send("Downloading media...", message)
             if is_x_url(url):
                 result = await fx.download(url, workdir)
@@ -1210,6 +1303,10 @@ async def process_message(
                 result = await download_with_ytdlp(url, workdir, config, opts)
             caption = format_caption(result.text, url)
             await signal.send(caption, message, result.media)
+        except DeferredCleanupTimeoutError as exc:
+            cleanup_deferred = True
+            log.info("Download timed out for %s: %s", url, exc)
+            await send_error(signal, str(exc), message)
         except DownloadError as exc:
             log.info("Download failed for %s: %s", url, exc)
             await send_error(signal, str(exc), message)
@@ -1217,7 +1314,8 @@ async def process_message(
             log.exception("Processing failed for %s", url)
             await send_error(signal, "I could not send that media right now.", message)
         finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+            if workdir is not None and not cleanup_deferred:
+                shutil.rmtree(workdir, ignore_errors=True)
 
 
 async def send_error(signal: SignalClient, text: str, message: IncomingMessage) -> None:
