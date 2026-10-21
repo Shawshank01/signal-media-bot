@@ -194,14 +194,6 @@ class DownloadOptions:
     info_only: bool = False
 
 
-def _first_dict(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, list):
-        return next((item for item in value if isinstance(item, dict)), None)
-    return None
-
-
 def unwrap_envelope(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Accept REST webhook envelopes and JSON-RPC notification wrappers."""
     candidates: list[Any] = [payload]
