@@ -1,6 +1,6 @@
 # Signal Media Bot
 
-Download media from links in Signal DMs and groups, then send the media back as Signal native playable attachments.
+Download media from links in Signal DMs and groups, then send the media back as native, playable attachments directly in Signal.
 
 > [!CAUTION]
 > **Privacy & Cloud Hosting Risks**:
@@ -10,7 +10,7 @@ Download media from links in Signal DMs and groups, then send the media back as 
 > [!NOTE]
 > **Recommendations**:
 >
-> - **Use a Dedicated Number**: Use a dedicated phone number instead of linking your personal primary Signal account. Only add this bot as a contact or add it to a group chat where you and your friends never send private messages.
+> - **Use a Dedicated Number**: Use a dedicated phone number instead of linking your personal primary Signal account. Only interact with the bot directly, or add it to group chats where sensitive or confidential information is not shared.
 > - **Self-Host at Home**: For absolute privacy, host on local hardware (e.g., Raspberry Pi or home server) where you own the physical machine. Since all traffic is outbound, no router ports need to be exposed.
 
 ## Setup
@@ -46,7 +46,7 @@ Start the Signal API:
 docker compose up -d signal-api
 ```
 
-Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The `signal-api` container runs in JSON-RPC mode and does not serve a Swagger UI, refer to the [signal-cli-rest-api docs](https://github.com/bbernhard/signal-cli-rest-api) for available endpoints.
+Use the registration endpoints from the `signal-cli-rest-api` documentation to submit the captcha, request the SMS code, and verify the code. The `signal-api` container runs in JSON-RPC mode and does not serve a Swagger UI. Refer to the [signal-cli-rest-api docs](https://github.com/bbernhard/signal-cli-rest-api) for available endpoints.
 
 ### Link Existing Account (Recommended)
 
@@ -56,7 +56,7 @@ Start the Signal API:
 docker compose up -d signal-api
 ```
 
-Request a pairing QR code on the VPS:
+Request a pairing QR code on your server:
 
 ```sh
 docker compose run --rm signal-bot sh -c \
@@ -98,13 +98,9 @@ Set `BOT_UUID` to the UUID from the identity record whose `number` matches `BOT_
 BOT_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-Restart the container if it is already running:
-
-```sh
-docker compose up -d signal-bot
-```
-
 ## Start the Bot
+
+Start the bot container (or restart it if already running):
 
 ```sh
 docker compose up -d --pull always signal-bot
@@ -144,6 +140,7 @@ Optional command arguments can force audio-only output, cap video resolution, se
 
 ```text
 /dl <url> audio
+/dl <url> 1080
 /dl <url> 720
 /dl <url> 480
 /dl <url> 360
@@ -191,5 +188,5 @@ docker compose run --rm signal-bot sh -c \
 
 - **[signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)** – Dockerized REST/JSON-RPC API gateway for Signal messaging and webhook routing.
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** – Media extraction engine supporting YouTube, TikTok, Instagram, Reddit, and hundreds of other platforms.
-- **[FxEmbed](https://github.com/FxEmbed/FxEmbed)** – API engine for Twitter/X media extraction and CDN stream resolution.
+- **[FxEmbed](https://github.com/FxEmbed/FxEmbed)** – API engine for Twitter/X and Bluesky media extraction and CDN stream resolution.
 - **[FFmpeg](https://ffmpeg.org/)** – Multimedia framework for audio/video stream multiplexing.
