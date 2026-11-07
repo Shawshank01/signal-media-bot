@@ -7,7 +7,7 @@ import logging
 import re
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1318,7 +1318,7 @@ async def send_error(signal: SignalClient, text: str, message: IncomingMessage) 
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     settings.shared_media_dir.mkdir(parents=True, exist_ok=True)
     if settings.cookies_file and settings.cookies_file.is_dir():
         log.warning(
