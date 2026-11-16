@@ -515,8 +515,12 @@ def _format_size(
 
 
 def select_ytdlp_format(
-    info: Mapping[str, Any], config: Settings, options: DownloadOptions
+    info: Mapping[str, Any],
+    config: Settings,
+    options: DownloadOptions,
+    excluded: set[str] | None = None,
 ) -> str:
+    excluded = excluded or set()
     raw_formats = info.get("formats") or []
     formats = [item for item in raw_formats if isinstance(item, dict)]
     duration = info.get("duration")
@@ -608,14 +612,20 @@ def select_ytdlp_format(
             (
                 item
                 for item in audio
-                if (size := _format_size(item, duration)) is not None
+                if str(item.get("format_id")) not in excluded
+                and (size := _format_size(item, duration)) is not None
                 and size <= config.max_file_size
             ),
             None,
         )
         if not selected:
             selected = next(
-                (item for item in audio if _format_size(item, duration) is None),
+                (
+                    item
+                    for item in audio
+                    if str(item.get("format_id")) not in excluded
+                    and _format_size(item, duration) is None
+                ),
                 None,
             )
         if not selected:
@@ -640,7 +650,11 @@ def select_ytdlp_format(
             if custom_audio:
                 continue
             size = _format_size(video_format, duration)
-            if size is not None and size <= config.max_file_size:
+            if (
+                str(video_format["format_id"]) not in excluded
+                and size is not None
+                and size <= config.max_file_size
+            ):
                 return str(video_format["format_id"])
             continue
         video_size = _format_size(video_format, duration)
@@ -648,11 +662,13 @@ def select_ytdlp_format(
             continue
         for audio_format in audio:
             audio_size = _format_size(audio_format, duration)
+            format_spec = f"{video_format['format_id']}+{audio_format['format_id']}"
             if (
-                audio_size is not None
+                format_spec not in excluded
+                and audio_size is not None
                 and video_size + audio_size <= config.max_file_size
             ):
-                return f"{video_format['format_id']}+{audio_format['format_id']}"
+                return format_spec
 
     raise DownloadError(
         "This video is too large to send, even at the lowest video quality. "
@@ -1014,8 +1030,6 @@ async def download_with_ytdlp(
                 info = extractor.extract_info(url, download=False)
             if not isinstance(info, dict):
                 raise DownloadError(format_ytdlp_error(None, url, config))
-            format_spec = select_ytdlp_format(info, config, options)
-            ytdlp_options["format"] = format_spec
             title = str(info.get("title") or "").strip()
 
             raw_formats = info.get("formats") or []
@@ -1049,21 +1063,60 @@ async def download_with_ytdlp(
                 else:
                     title += f"\n\n[Audio: {chosen_lang}]"
 
-            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
-                downloader.download([url])
+            excluded: set[str] = set()
+            size_error: DownloadError | None = None
+            while True:
+                try:
+                    format_spec = select_ytdlp_format(info, config, options, excluded)
+                except DownloadError:
+                    if size_error is not None:
+                        raise size_error
+                    raise
+                ytdlp_options["format"] = format_spec
+                with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
+                    downloader.download([url])
+                paths = [
+                    path
+                    for path in destination.iterdir()
+                    if path.is_file() and path.name != ".cookies.txt"
+                ]
+                if not paths:
+                    raise DownloadError("No downloadable media was found at that link.")
+                oversized = next(
+                    (
+                        path
+                        for path in paths
+                        if path.stat().st_size > config.max_file_size
+                    ),
+                    None,
+                )
+                if oversized is None:
+                    return paths, title
+                is_audio = (
+                    options.audio_only
+                    or oversized.suffix.lower() in AUDIO_CONTENT_TYPES
+                )
+                if is_audio:
+                    size_error = DownloadError(
+                        f"This audio is too large to send within {config.max_file_size_mb} MB."
+                    )
+                else:
+                    size_error = DownloadError(
+                        f"This media is too large to send within {config.max_file_size_mb} MB. "
+                        "Try `/dl <url> audio` to download only its audio."
+                    )
+                log.info(
+                    "Downloaded format %s exceeds the size limit; trying another format",
+                    format_spec,
+                )
+                excluded.add(format_spec)
+                for path in paths:
+                    path.unlink()
         except (YtDlpDownloadError, OSError) as exc:
             raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
         finally:
             if temporary_cookie_file:
                 temporary_cookie_file.unlink(missing_ok=True)
-        return (
-            [
-                path
-                for path in destination.iterdir()
-                if path.is_file() and path.name != ".cookies.txt"
-            ],
-            title,
-        )
 
     try:
         paths, title = await _run_thread_with_timeout(

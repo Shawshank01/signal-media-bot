@@ -156,7 +156,7 @@ Optional command arguments can force audio-only output, cap video resolution, se
 - **Audio Track Selection**: On videos with multiple dubs/audio tracks (e.g. YouTube multi-language videos), use `lang:<code>` (e.g., `lang:de`, `lang:jp`) or `track:<id>` (e.g., `track:140-4`). By default, the bot automatically selects the original/default audio track and avoids compressed DRC tracks.
 - **Inspect Media (`info`)**: Use `/dl <url> info` to view available resolutions and audio tracks without downloading.
 
-Video downloads are selected as the highest available video and audio combination. If the video file is larger than 100 MB, it will step down through the available resolutions. If no video format fits, it explains how to request audio only.
+Video downloads are selected as the highest available video and audio combination estimated to fit the size limit. If the finished file is too large, the bot retries other combinations in preference order, including lower resolutions if necessary. If no video format fits, it explains how to request audio only. Retries take additional time and are subject to the download timeout.
 
 ## Update
 
