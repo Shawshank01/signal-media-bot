@@ -82,15 +82,14 @@ Signal uses UUIDs (ACI) to identify accounts. Set `BOT_UUID` in `.env` to enable
 Confirm that the linked account is registered:
 
 ```sh
-curl -s http://127.0.0.1:18080/v1/accounts
+BOT_PHONE_NUMBER=$(sed -n 's/^BOT_PHONE_NUMBER=//p' .env)
 ```
-
-The response should contain the bot's phone number. To query identities, first load the number from `.env` because values in `.env` are not automatically shell variables:
 
 ```sh
-BOT_PHONE_NUMBER=$(sed -n 's/^BOT_PHONE_NUMBER=//p' .env)
 curl -s "http://127.0.0.1:18080/v1/identities/${BOT_PHONE_NUMBER}"
 ```
+
+The response should contain the bot's phone number.
 
 Set `BOT_UUID` to the UUID from the identity record whose `number` matches `BOT_PHONE_NUMBER`:
 
