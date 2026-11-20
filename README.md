@@ -155,7 +155,9 @@ Optional command arguments can force audio-only output, cap video resolution, se
 - **Audio Track Selection**: On videos with multiple dubs/audio tracks (e.g. YouTube multi-language videos), use `lang:<code>` (e.g., `lang:de`, `lang:jp`) or `track:<id>` (e.g., `track:140-4`). By default, the bot automatically selects the original/default audio track and avoids compressed DRC tracks.
 - **Inspect Media (`info`)**: Use `/dl <url> info` to view available resolutions and audio tracks without downloading.
 
-Video downloads are selected as the highest available video and audio combination estimated to fit the size limit. If the finished file is too large, the bot retries other combinations in preference order, including lower resolutions if necessary. If no video format fits, it explains how to request audio only. Retries take additional time and are subject to the download timeout.
+The bot ranks video and audio formats and checks the finished file against the size limit. If a download is too large, the bot tries other formats, including lower resolutions. The `audio` option can also extract audio from a combined video and audio file. Retries count toward the download timeout.
+
+For X and Bluesky, yt-dlp handles video and audio and FxEmbed supplies photos. Mixed posts can return both. For a plain download request, the bot can fall back to FxEmbed video if yt-dlp fails.
 
 The bot processes one message at a time and queues up to eight more. A full queue returns HTTP 503 to the Signal API. If your request doesn't get a reply, send it again after the bot finishes earlier requests.
 

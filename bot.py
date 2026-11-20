@@ -12,7 +12,9 @@ import sys
 import tempfile
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager, suppress
+from copy import deepcopy
 from dataclasses import asdict, dataclass
+from mimetypes import guess_type
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -22,7 +24,7 @@ import yt_dlp
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from yt_dlp.utils import DownloadError as YtDlpDownloadError
+from yt_dlp.utils import YoutubeDLError
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -110,6 +112,7 @@ AUDIO_CONTENT_TYPES = {
     ".m4a": "audio/mp4",
     ".mp3": "audio/mpeg",
     ".aac": "audio/aac",
+    ".flac": "audio/flac",
     ".ogg": "audio/ogg",
     ".opus": "audio/ogg",
     ".wav": "audio/wav",
@@ -192,6 +195,13 @@ class DownloadOptions:
     audio_lang: str | None = None
     audio_track: str | None = None
     info_only: bool = False
+
+
+@dataclass(frozen=True)
+class FxPost:
+    text: str
+    photos: list[str]
+    videos: list[list[str]]
 
 
 def unwrap_envelope(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -487,7 +497,7 @@ class DownloadError(Exception):
 def _metadata_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -510,6 +520,25 @@ def _format_size(
     return None
 
 
+def _is_audio_format(media_format: Mapping[str, Any]) -> bool:
+    vcodec = media_format.get("vcodec")
+    return media_format.get("acodec") != "none" and (
+        vcodec == "none"
+        or (vcodec is None and f".{media_format.get('ext')}" in AUDIO_CONTENT_TYPES)
+    )
+
+
+def _is_video_format(media_format: Mapping[str, Any]) -> bool:
+    vcodec = media_format.get("vcodec")
+    if vcodec is not None:
+        return vcodec != "none"
+    return bool(
+        media_format.get("height")
+        or media_format.get("width")
+        or media_format.get("ext") in {"mp4", "webm", "mkv", "mov", "gif", "ts", "m4v"}
+    )
+
+
 def select_ytdlp_format(
     info: Mapping[str, Any],
     config: Settings,
@@ -518,19 +547,23 @@ def select_ytdlp_format(
 ) -> str:
     excluded = excluded or set()
     raw_formats = info.get("formats") or []
-    formats = [item for item in raw_formats if isinstance(item, dict)]
+    formats = [
+        item for item in raw_formats if isinstance(item, dict) and item.get("format_id")
+    ]
     duration = info.get("duration")
 
+    video_formats = [item for item in formats if _is_video_format(item)]
     video = [
         item
-        for item in formats
-        if item.get("vcodec") not in (None, "none")
-        and (
+        for item in video_formats
+        if (
             options.max_height is None
-            or _metadata_int(item.get("height")) <= options.max_height
+            or 0 < _metadata_int(item.get("height")) <= options.max_height
         )
     ]
-    audio = [item for item in formats if item.get("vcodec") in (None, "none")]
+    audio = [item for item in formats if _is_audio_format(item)]
+    if options.audio_only:
+        audio.extend(item for item in video_formats if item.get("acodec") != "none")
     codec_order = ("av01", "vp9", "avc1") if options.bestmini else ("av01", "avc1")
     audio_order = ("mp4a", "opus")
 
@@ -591,44 +624,40 @@ def select_ytdlp_format(
             )
         audio = matching_audio
 
-    def audio_rank(item: Mapping[str, Any]) -> tuple[int, int, int, int, int]:
+    def audio_rank(item: Mapping[str, Any]) -> tuple[int, ...]:
         note = str(item.get("format_note") or "").lower()
         fid = str(item.get("format_id") or "").lower()
         is_drc = 1 if ("drc" in fid or "drc" in note.split()) else 0
         pref = _metadata_int(item.get("language_preference"))
         is_default = 1 if ("(default)" in note or "original" in note) else 0
-        bitrate = _metadata_int(item.get("abr") or item.get("tbr"))
+        standalone = _is_audio_format(item)
+        bitrate = _metadata_int(
+            item.get("abr") or (item.get("tbr") if standalone else None)
+        )
         codec = codec_rank(item, audio_order, "acodec")
-        return (is_drc, -pref, -is_default, codec, -bitrate)
+        return (is_drc, -pref, -is_default, codec, -bitrate, not standalone)
 
     audio.sort(key=audio_rank)
 
-    if options.audio_only or (not video and audio):
-        selected = next(
-            (
+    if options.audio_only or (not video_formats and audio):
+        if not audio:
+            raise DownloadError("No downloadable audio was found at that link.")
+        for item in audio:
+            format_id = str(item["format_id"])
+            # A combined file's size includes video that FFmpeg will discard.
+            size_info = (
                 item
-                for item in audio
-                if str(item.get("format_id")) not in excluded
-                and (size := _format_size(item, duration)) is not None
-                and size <= config.max_file_size
-            ),
-            None,
+                if _is_audio_format(item)
+                else {"abr": item.get("abr"), "duration": item.get("duration")}
+            )
+            size = _format_size(size_info, duration)
+            if format_id not in excluded and (
+                size is None or size <= config.max_file_size
+            ):
+                return format_id
+        raise DownloadError(
+            f"This audio is too large to send within {config.max_file_size_mb} MB."
         )
-        if not selected:
-            selected = next(
-                (
-                    item
-                    for item in audio
-                    if str(item.get("format_id")) not in excluded
-                    and _format_size(item, duration) is None
-                ),
-                None,
-            )
-        if not selected:
-            raise DownloadError(
-                f"This audio is too large to send within {config.max_file_size_mb} MB."
-            )
-        return str(selected["format_id"])
 
     if not video:
         raise DownloadError("No downloadable media was found at that link.")
@@ -637,32 +666,29 @@ def select_ytdlp_format(
         key=lambda item: (
             -_metadata_int(item.get("height")),
             codec_rank(item, codec_order, "vcodec"),
+            -_metadata_int(item.get("fps")),
+            -_metadata_int(item.get("vbr") or item.get("tbr")),
         )
     )
 
     custom_audio = bool(options.audio_lang or options.audio_track)
     for video_format in video:
-        if video_format.get("acodec") not in (None, "none"):
+        if video_format.get("acodec") != "none" or not audio:
             if custom_audio:
                 continue
             size = _format_size(video_format, duration)
-            if (
-                str(video_format["format_id"]) not in excluded
-                and size is not None
-                and size <= config.max_file_size
+            if str(video_format["format_id"]) not in excluded and (
+                size is None or size <= config.max_file_size
             ):
                 return str(video_format["format_id"])
             continue
         video_size = _format_size(video_format, duration)
-        if video_size is None:
-            continue
         for audio_format in audio:
             audio_size = _format_size(audio_format, duration)
             format_spec = f"{video_format['format_id']}+{audio_format['format_id']}"
             if (
                 format_spec not in excluded
-                and audio_size is not None
-                and video_size + audio_size <= config.max_file_size
+                and (video_size or 0) + (audio_size or 0) <= config.max_file_size
             ):
                 return format_spec
 
@@ -672,12 +698,36 @@ def select_ytdlp_format(
     )
 
 
+def _fx_items(items: Any) -> list[dict[str, Any]]:
+    return (
+        [item for item in items if isinstance(item, dict)]
+        if isinstance(items, list)
+        else []
+    )
+
+
+def _fx_video_urls(video: dict[str, Any], variants: list[dict[str, Any]]) -> list[str]:
+    candidates = sorted(
+        variants, key=lambda item: _metadata_int(item.get("bitrate")), reverse=True
+    )
+    urls = [item.get("url") for item in [*candidates, video]]
+    return list(
+        dict.fromkeys(
+            url
+            for url in urls
+            if isinstance(url, str)
+            and url
+            and not urlparse(url).path.lower().endswith(".m3u8")
+        )
+    )
+
+
 class FxTwitterClient:
     def __init__(self, client: httpx.AsyncClient, config: Settings):
         self.client = client
         self.config = config
 
-    async def download(self, url: str, destination: Path) -> DownloadResult:
+    async def fetch(self, url: str) -> FxPost:
         match = X_STATUS_RE.search(urlparse(url).path)
         if not match:
             raise DownloadError("That X link is not a status post.")
@@ -691,124 +741,32 @@ class FxTwitterClient:
             raise DownloadError("The X media service returned invalid JSON.") from exc
         if not isinstance(data, dict) or not isinstance(data.get("tweet"), dict):
             raise DownloadError("The X media service returned an invalid response.")
-        data = data["tweet"]
-        text = str(data.get("text") or "").strip()
-        media = data.get("media") or {}
+        post = data["tweet"]
+        media = post.get("media") or {}
         if not isinstance(media, dict):
             raise DownloadError("The X media service returned invalid media data.")
 
-        output: list[DownloadedMedia] = []
-        had_video = False
-
-        all_items = [
-            item for item in (media.get("all") or []) if isinstance(item, dict)
-        ]
-        if all_items:
-            v_idx = 0
-            p_idx = 0
-            for item in all_items:
-                item_type = str(item.get("type") or "").lower()
-                if item_type in ("video", "gif"):
-                    had_video = True
-                    variants = [
-                        v for v in item.get("variants", []) if isinstance(v, dict)
-                    ]
-                    candidates = sorted(
-                        variants or [item],
-                        key=lambda v: _metadata_int(v.get("bitrate")),
-                        reverse=True,
-                    )
-                    filename = (
-                        f"video-{v_idx}.mp4" if len(all_items) > 1 else "video.mp4"
-                    )
-                    v_idx += 1
-                    for candidate in candidates:
-                        media_url = candidate.get("url") or item.get("url")
-                        if not media_url:
-                            continue
-                        try:
-                            downloaded = await stream_to_file(
-                                self.client,
-                                media_url,
-                                destination / filename,
-                                self.config,
-                            )
-                            output.append(downloaded)
-                            break
-                        except DownloadError as exc:
-                            if "too large to send" in str(exc):
-                                continue
-                            raise
-                elif item_type == "photo":
-                    media_url = item.get("url")
-                    if media_url:
-                        filename = f"image-{p_idx}.jpg"
-                        p_idx += 1
-                        output.append(
-                            await stream_to_file(
-                                self.client,
-                                media_url,
-                                destination / filename,
-                                self.config,
-                            )
-                        )
-        else:
-            videos = [
-                item for item in (media.get("videos") or []) if isinstance(item, dict)
-            ]
-            photos = [
-                item for item in (media.get("photos") or []) if isinstance(item, dict)
-            ]
-            if videos:
-                had_video = True
-                for v_idx, video in enumerate(videos):
-                    variants = [
-                        v for v in video.get("variants", []) if isinstance(v, dict)
-                    ]
-                    candidates = sorted(
-                        variants or [video],
-                        key=lambda v: _metadata_int(v.get("bitrate")),
-                        reverse=True,
-                    )
-                    filename = f"video-{v_idx}.mp4" if len(videos) > 1 else "video.mp4"
-                    for candidate in candidates:
-                        media_url = candidate.get("url") or video.get("url")
-                        if not media_url:
-                            continue
-                        try:
-                            downloaded = await stream_to_file(
-                                self.client,
-                                media_url,
-                                destination / filename,
-                                self.config,
-                            )
-                            output.append(downloaded)
-                            break
-                        except DownloadError as exc:
-                            if "too large to send" in str(exc):
-                                continue
-                            raise
-            if photos:
-                for p_idx, photo in enumerate(photos):
-                    media_url = photo.get("url")
-                    if media_url:
-                        output.append(
-                            await stream_to_file(
-                                self.client,
-                                media_url,
-                                destination / f"image-{p_idx}.jpg",
-                                self.config,
-                            )
-                        )
-
-        if output:
-            return DownloadResult(media=output, text=text)
-        if had_video:
-            raise DownloadError(
-                f"This media is too large to send within {self.config.max_file_size_mb} MB. "
-                "Try `/dl <url> audio` to download only its audio."
-            )
-        raise DownloadError("No downloadable media was found in that post.")
+        all_items = _fx_items(media.get("all"))
+        videos = [
+            item
+            for item in all_items
+            if str(item.get("type")).lower() in ("video", "gif")
+        ] or _fx_items(media.get("videos"))
+        photos = [
+            item for item in all_items if str(item.get("type")).lower() == "photo"
+        ] or _fx_items(media.get("photos"))
+        return FxPost(
+            text=str(post.get("text") or "").strip(),
+            photos=[
+                item["url"]
+                for item in photos
+                if isinstance(item.get("url"), str) and item["url"]
+            ],
+            videos=[
+                _fx_video_urls(video, _fx_items(video.get("variants")))
+                for video in videos
+            ],
+        )
 
 
 class FxBlueskyClient:
@@ -816,7 +774,7 @@ class FxBlueskyClient:
         self.client = client
         self.config = config
 
-    async def download(self, url: str, destination: Path) -> DownloadResult:
+    async def fetch(self, url: str) -> FxPost:
         match = BSKY_POST_RE.search(urlparse(url).path)
         if not match:
             raise DownloadError("That Bluesky link is not a post.")
@@ -825,80 +783,109 @@ class FxBlueskyClient:
         response = await self.client.get(api_url)
         response.raise_for_status()
         try:
-            response_data = response.json()
+            data = response.json()
         except ValueError as exc:
             raise DownloadError(
                 "The Bluesky media service returned invalid JSON."
             ) from exc
-        if not isinstance(response_data, dict) or not isinstance(
-            response_data.get("status"), dict
-        ):
+        if not isinstance(data, dict) or not isinstance(data.get("status"), dict):
             raise DownloadError(
                 "The Bluesky media service returned an invalid response."
             )
-        data = response_data["status"]
-        text = str(data.get("text") or "").strip()
-        media = data.get("media") or {}
+        post = data["status"]
+        media = post.get("media") or {}
         if not isinstance(media, dict):
             raise DownloadError(
                 "The Bluesky media service returned invalid media data."
             )
-        videos = [
-            item for item in (media.get("videos") or []) if isinstance(item, dict)
-        ]
-        photos = [
-            item for item in (media.get("photos") or []) if isinstance(item, dict)
-        ]
-        output: list[DownloadedMedia] = []
-        had_video = False
-        if videos:
-            had_video = True
-            for v_idx, video in enumerate(videos):
-                formats = [
-                    item
-                    for item in video.get("formats", [])
-                    if isinstance(item, dict) and item.get("container") == "mp4"
-                ]
-                candidates = sorted(
-                    formats or [video],
-                    key=lambda item: _metadata_int(item.get("bitrate")),
-                    reverse=True,
+
+        return FxPost(
+            text=str(post.get("text") or "").strip(),
+            photos=[
+                item["url"]
+                for item in _fx_items(media.get("photos"))
+                if isinstance(item.get("url"), str) and item["url"]
+            ],
+            videos=[
+                _fx_video_urls(
+                    video,
+                    [
+                        item
+                        for item in _fx_items(video.get("formats"))
+                        if item.get("container") == "mp4"
+                    ],
                 )
-                filename = f"video-{v_idx}.mp4" if len(videos) > 1 else "video.mp4"
-                for candidate in candidates:
-                    media_url = candidate.get("url") or video.get("url")
-                    if not media_url:
-                        continue
-                    try:
-                        downloaded = await stream_to_file(
-                            self.client, media_url, destination / filename, self.config
-                        )
-                        output.append(downloaded)
-                        break
-                    except DownloadError as exc:
-                        if "too large to send" in str(exc):
-                            continue
-                        raise
-        if photos:
-            for index, photo in enumerate(photos):
-                media_url = photo.get("url")
-                if media_url:
-                    output.append(
-                        await stream_to_file(
-                            self.client,
-                            media_url,
-                            destination / f"image-{index}.jpg",
-                            self.config,
-                        )
+                for video in _fx_items(media.get("videos"))
+            ],
+        )
+
+
+async def download_social_media(
+    url: str,
+    destination: Path,
+    config: Settings,
+    options: DownloadOptions,
+    fx: FxTwitterClient | FxBlueskyClient,
+) -> DownloadResult:
+    if options.audio_only:
+        return await download_with_ytdlp(url, destination, config, options)
+
+    post = None
+    try:
+        # Keep an unavailable photo service from consuming the video deadline.
+        async with asyncio.timeout(min(15, config.download_timeout_seconds / 2)):
+            post = await fx.fetch(url)
+    except (DownloadError, httpx.HTTPError, TimeoutError) as exc:
+        log.info("FxEmbed lookup failed for %s: %s", url, exc)
+
+    media = []
+    text = post.text if post else ""
+    error = None
+    if post is None or post.videos or not post.photos:
+        video_dir = destination / "yt-dlp"
+        video_dir.mkdir()
+        try:
+            video = await download_with_ytdlp(url, video_dir, config, options)
+            media.extend(video.media)
+            text = text or video.text
+        except DownloadError as exc:
+            error = exc
+            if post and options == DownloadOptions():
+                log.info("Trying FxEmbed video fallback for %s: %s", url, exc)
+                for index, candidates in enumerate(post.videos):
+                    for candidate in candidates:
+                        try:
+                            media.append(
+                                await stream_to_file(
+                                    fx.client,
+                                    candidate,
+                                    destination / f"video-{index}.mp4",
+                                    config,
+                                )
+                            )
+                            break
+                        except DownloadError as fallback_error:
+                            log.info(
+                                "FxEmbed video variant failed for %s: %s",
+                                url,
+                                fallback_error,
+                            )
+
+    if post:
+        for index, photo in enumerate(post.photos):
+            try:
+                media.append(
+                    await stream_to_file(
+                        fx.client, photo, destination / f"image-{index}.jpg", config
                     )
-        if output:
-            return DownloadResult(media=output, text=text)
-        if had_video:
-            raise DownloadError(
-                f"This media is too large to send within {self.config.max_file_size_mb} MB. "
-                "Try `/dl <url> audio` to download only its audio."
-            )
-        raise DownloadError("No downloadable media was found in that post.")
+                )
+            except DownloadError as exc:
+                log.info("FxEmbed photo download failed for %s: %s", url, exc)
+                error = error or exc
+
+    if media:
+        return DownloadResult(media=media, text=text)
+    raise error or DownloadError("No downloadable media was found in that post.")
 
 
 async def stream_to_file(
@@ -995,18 +982,127 @@ def format_ytdlp_error(exc: Exception | None, url: str, config: Settings) -> str
 
 
 def _downloaded_files(destination: Path) -> list[Path]:
-    return [
+    return sorted(
         path
         for path in destination.iterdir()
-        if path.is_file() and path.name != ".cookies.txt"
+        if path.is_file()
+        and path.name != ".cookies.txt"
+        and path.suffix not in {".part", ".ytdl"}
+    )
+
+
+def _ytdlp_entries(info: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    if "entries" not in info:
+        return [info]
+    return [
+        video
+        for entry in info["entries"] or []
+        if isinstance(entry, dict)
+        for video in _ytdlp_entries(entry)
     ]
+
+
+def _download_title(info: Mapping[str, Any], options: DownloadOptions) -> str:
+    title = str(info.get("title") or "").strip()
+
+    raw_formats = info.get("formats") or []
+    audio_formats = [
+        f for f in raw_formats if isinstance(f, dict) and _is_audio_format(f)
+    ]
+    distinct_langs = sorted(
+        {
+            str(f.get("language"))
+            for f in audio_formats
+            if f.get("language") and str(f.get("language")) != "None"
+        }
+    )
+    if len(distinct_langs) > 1:
+        chosen_lang = options.audio_lang or next(
+            (
+                str(f.get("language"))
+                for f in audio_formats
+                if "(default)" in str(f.get("format_note") or "")
+                or _metadata_int(f.get("language_preference")) > 0
+            ),
+            distinct_langs[0],
+        )
+        other_langs = [l for l in distinct_langs if l != chosen_lang]
+        if other_langs:
+            title += f"\n\n[Audio: {chosen_lang} | Other tracks: {', '.join(other_langs)} (use lang:<code>)]"
+        else:
+            title += f"\n\n[Audio: {chosen_lang}]"
+    return title
+
+
+def _download_ytdlp_entry(
+    url: str,
+    info: Mapping[str, Any],
+    destination: Path,
+    config: Settings,
+    options: DownloadOptions,
+    ytdlp_options: dict[str, Any],
+    filename: str,
+) -> None:
+    excluded: set[str] = set()
+    last_error: DownloadError | None = None
+    while True:
+        try:
+            format_spec = select_ytdlp_format(info, config, options, excluded)
+        except DownloadError:
+            if last_error is not None:
+                raise last_error from None
+            raise
+
+        with tempfile.TemporaryDirectory(dir=destination) as directory:
+            attempt = {
+                **ytdlp_options,
+                "format": format_spec,
+                "outtmpl": str(Path(directory) / filename),
+            }
+            if options.audio_only:
+                attempt["postprocessors"] = [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "best",
+                    }
+                ]
+            try:
+                with yt_dlp.YoutubeDL(cast(Any, attempt)) as downloader:
+                    # yt-dlp types extractor results with a private TypedDict.
+                    attempt_info = deepcopy(dict(info))
+                    downloader.process_ie_result(cast(Any, attempt_info), download=True)
+            except YoutubeDLError as exc:
+                last_error = DownloadError(format_ytdlp_error(exc, url, config))
+            else:
+                paths = _downloaded_files(Path(directory))
+                if not paths:
+                    last_error = DownloadError(
+                        "No downloadable media was found at that link."
+                    )
+                elif any(path.stat().st_size > config.max_file_size for path in paths):
+                    if options.audio_only or all(
+                        path.suffix.lower() in AUDIO_CONTENT_TYPES for path in paths
+                    ):
+                        last_error = DownloadError(
+                            f"This audio is too large to send within {config.max_file_size_mb} MB."
+                        )
+                    else:
+                        last_error = DownloadError(
+                            f"This media is too large to send within {config.max_file_size_mb} MB. "
+                            "Try `/dl <url> audio` to download only its audio."
+                        )
+                else:
+                    for path in paths:
+                        path.replace(destination / path.name)
+                    return
+        log.info("Format %s failed, trying another format: %s", format_spec, last_error)
+        excluded.add(format_spec)
 
 
 def _download_ytdlp(
     url: str, destination: Path, config: Settings, options: DownloadOptions
 ) -> str:
     ytdlp_options: dict[str, Any] = {
-        "outtmpl": str(destination / "%(id)s.%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -1021,95 +1117,45 @@ def _download_ytdlp(
         temporary_cookie_file = destination / ".cookies.txt"
         shutil.copyfile(config.cookies_file, temporary_cookie_file)
         ytdlp_options["cookiefile"] = str(temporary_cookie_file)
-    title = ""
     try:
         with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
             info = extractor.extract_info(url, download=False)
         if not isinstance(info, dict):
             raise DownloadError(format_ytdlp_error(None, url, config))
-        title = str(info.get("title") or "").strip()
 
-        raw_formats = info.get("formats") or []
-        audio_formats = [
-            f
-            for f in raw_formats
-            if isinstance(f, dict)
-            and f.get("vcodec") in (None, "none")
-            and f.get("acodec") not in (None, "none")
-        ]
-        distinct_langs = sorted(
-            {
-                str(f.get("language"))
-                for f in audio_formats
-                if f.get("language") and str(f.get("language")) != "None"
-            }
-        )
-        if len(distinct_langs) > 1:
-            chosen_lang = options.audio_lang or next(
-                (
-                    str(f.get("language"))
-                    for f in audio_formats
-                    if "(default)" in str(f.get("format_note") or "")
-                    or _metadata_int(f.get("language_preference")) > 0
-                ),
-                distinct_langs[0],
-            )
-            other_langs = [l for l in distinct_langs if l != chosen_lang]
-            if other_langs:
-                title += f"\n\n[Audio: {chosen_lang} | Other tracks: {', '.join(other_langs)} (use lang:<code>)]"
-            else:
-                title += f"\n\n[Audio: {chosen_lang}]"
-
-        excluded: set[str] = set()
-        size_error: DownloadError | None = None
-        while True:
+        entries = _ytdlp_entries(info) if is_x_url(url) or is_bsky_url(url) else [info]
+        last_error = None
+        downloaded = False
+        for index, entry in enumerate(entries, 1):
+            filename = "%(id)s.%(ext)s"
+            if len(entries) > 1:
+                filename = f"{index:02d}-{filename}"
             try:
-                format_spec = select_ytdlp_format(info, config, options, excluded)
-            except DownloadError:
-                if size_error is not None:
-                    raise size_error
-                raise
-            ytdlp_options["format"] = format_spec
-            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
-                downloader.download([url])
-            paths = _downloaded_files(destination)
-            if not paths:
-                raise DownloadError("No downloadable media was found at that link.")
-            oversized = next(
-                (
-                    path
-                    for path in paths
-                    if path.stat().st_size > config.max_file_size
-                ),
-                None,
-            )
-            if oversized is None:
-                return title
-            is_audio = (
-                options.audio_only
-                or oversized.suffix.lower() in AUDIO_CONTENT_TYPES
-            )
-            if is_audio:
-                size_error = DownloadError(
-                    f"This audio is too large to send within {config.max_file_size_mb} MB."
+                _download_ytdlp_entry(
+                    url, entry, destination, config, options, ytdlp_options, filename
                 )
+            except DownloadError as exc:
+                last_error = exc
+                log.info("Could not download clip %s from %s: %s", index, url, exc)
             else:
-                size_error = DownloadError(
-                    f"This media is too large to send within {config.max_file_size_mb} MB. "
-                    "Try `/dl <url> audio` to download only its audio."
-                )
-            log.info(
-                "Downloaded format %s exceeds the size limit; trying another format",
-                format_spec,
+                downloaded = True
+        if not downloaded:
+            raise last_error or DownloadError(
+                "No downloadable media was found at that link."
             )
-            excluded.add(format_spec)
-            for path in paths:
-                path.unlink()
-    except (YtDlpDownloadError, OSError) as exc:
+        return _download_title(info, options) or _download_title(entries[0], options)
+    except (YoutubeDLError, OSError) as exc:
         raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
     finally:
         if temporary_cookie_file:
             temporary_cookie_file.unlink(missing_ok=True)
+
+
+def _ytdlp_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.hostname == "fxbsky.app":
+        return parsed._replace(netloc="bsky.app").geturl()
+    return url
 
 
 async def download_with_ytdlp(
@@ -1120,7 +1166,7 @@ async def download_with_ytdlp(
 ) -> DownloadResult:
     options = options or DownloadOptions()
     try:
-        title = await _run_ytdlp_worker(url, destination, config, options)
+        title = await _run_ytdlp_worker(_ytdlp_url(url), destination, config, options)
     except TimeoutError as exc:
         raise DownloadError("The download timed out.") from exc
     paths = _downloaded_files(destination)
@@ -1141,11 +1187,9 @@ async def download_with_ytdlp(
         media=[
             DownloadedMedia(
                 path,
-                "video/mp4"
-                if path.suffix.lower() == ".mp4"
-                else AUDIO_CONTENT_TYPES.get(
-                    path.suffix.lower(), "application/octet-stream"
-                ),
+                AUDIO_CONTENT_TYPES.get(path.suffix.lower())
+                or guess_type(path.name)[0]
+                or "application/octet-stream",
             )
             for path in paths
         ],
@@ -1209,12 +1253,19 @@ def _inspect_ytdlp(url: str, destination: Path, config: Settings) -> str:
     try:
         with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
             info = extractor.extract_info(url, download=False)
-    except (YtDlpDownloadError, OSError) as exc:
+    except (YoutubeDLError, OSError) as exc:
         raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
 
     if not isinstance(info, dict):
         raise DownloadError(format_ytdlp_error(None, url, config))
 
+    entries = _ytdlp_entries(info) if is_x_url(url) or is_bsky_url(url) else [info]
+    if not entries:
+        raise DownloadError("No downloadable media was found at that link.")
+    return "\n\n".join(_describe_ytdlp_entry(entry) for entry in entries)
+
+
+def _describe_ytdlp_entry(info: Mapping[str, Any]) -> str:
     title = str(info.get("title") or "Media").strip()
     raw_formats = info.get("formats") or []
     formats = [f for f in raw_formats if isinstance(f, dict)]
@@ -1223,17 +1274,12 @@ def _inspect_ytdlp(url: str, destination: Path, config: Settings) -> str:
         {
             _metadata_int(f.get("height"))
             for f in formats
-            if f.get("vcodec") not in (None, "none") and f.get("height")
+            if _is_video_format(f) and f.get("height")
         },
         reverse=True,
     )
 
-    audio_formats = [
-        f
-        for f in formats
-        if f.get("vcodec") in (None, "none")
-        and f.get("acodec") not in (None, "none")
-    ]
+    audio_formats = [f for f in formats if _is_audio_format(f)]
     tracks: dict[str, str] = {}
     for af in audio_formats:
         lang = str(af.get("language") or "")
@@ -1265,7 +1311,7 @@ def _inspect_ytdlp(url: str, destination: Path, config: Settings) -> str:
 async def extract_media_info(url: str, config: Settings) -> str:
     with tempfile.TemporaryDirectory(prefix="ytdlp-info-") as directory:
         try:
-            return await _run_ytdlp_worker(url, Path(directory), config)
+            return await _run_ytdlp_worker(_ytdlp_url(url), Path(directory), config)
         except TimeoutError as exc:
             raise DownloadError("Media inspection timed out.") from exc
 
@@ -1282,7 +1328,10 @@ async def _run_ytdlp_worker(
         "config": config.model_dump(mode="json"),
         "options": asdict(options) if options is not None else None,
     }
-    with tempfile.TemporaryFile() as request_file, tempfile.TemporaryFile() as result_file:
+    with (
+        tempfile.TemporaryFile() as request_file,
+        tempfile.TemporaryFile() as result_file,
+    ):
         request_file.write(json.dumps(request).encode("utf-8"))
         request_file.seek(0)
         result_fd = result_file.fileno()
@@ -1363,14 +1412,8 @@ async def process_message(
     for url in urls:
         if opts.info_only:
             try:
-                if is_x_url(url) or is_bsky_url(url):
-                    await signal.send(
-                        "Info command is only supported for video platforms like YouTube.",
-                        message,
-                    )
-                else:
-                    info_text = await extract_media_info(url, config)
-                    await signal.send(info_text, message)
+                info_text = await extract_media_info(url, config)
+                await signal.send(info_text, message)
             except DownloadError as exc:
                 log.info("Info extraction failed for %s: %s", url, exc)
                 await send_error(signal, str(exc), message)
@@ -1387,14 +1430,15 @@ async def process_message(
                 tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir)
             )
             await signal.send("Downloading media...", message)
-            if is_x_url(url):
-                async with asyncio.timeout(config.download_timeout_seconds):
-                    result = await fx.download(url, workdir)
-            elif is_bsky_url(url):
-                async with asyncio.timeout(config.download_timeout_seconds):
-                    result = await bsky.download(url, workdir)
-            else:
-                result = await download_with_ytdlp(url, workdir, config, opts)
+            async with asyncio.timeout(config.download_timeout_seconds):
+                if is_x_url(url):
+                    result = await download_social_media(url, workdir, config, opts, fx)
+                elif is_bsky_url(url):
+                    result = await download_social_media(
+                        url, workdir, config, opts, bsky
+                    )
+                else:
+                    result = await download_with_ytdlp(url, workdir, config, opts)
             caption = format_caption(result.text, url)
             await signal.send(caption, message, result.media)
         except TimeoutError:
@@ -1419,7 +1463,9 @@ async def send_error(signal: SignalClient, text: str, message: IncomingMessage) 
 
 
 async def _process_queue(
-    messages: asyncio.Queue[IncomingMessage], config: Settings, client: httpx.AsyncClient
+    messages: asyncio.Queue[IncomingMessage],
+    config: Settings,
+    client: httpx.AsyncClient,
 ) -> None:
     while True:
         message = await messages.get()

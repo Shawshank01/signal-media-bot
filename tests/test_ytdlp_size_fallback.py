@@ -35,7 +35,7 @@ class SizeFallbackTests(unittest.TestCase):
             def extract_info(self, url, download):
                 return info
 
-            def download(self, urls):
+            def process_ie_result(self, info, download):
                 spec = self.options["format"]
                 attempts.append(spec)
                 output = Path(self.options["outtmpl"].replace("%(id)s", "video").replace("%(ext)s", "mp4"))
@@ -67,7 +67,7 @@ class SizeFallbackTests(unittest.TestCase):
             def extract_info(self, url, download):
                 return info
 
-            def download(self, urls):
+            def process_ie_result(self, info, download):
                 spec = self.settings["format"]
                 attempts.append(spec)
                 suffix = "m4a" if options and options.audio_only else "mp4"
