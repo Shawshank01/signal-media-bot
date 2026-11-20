@@ -1,18 +1,32 @@
 version: 2
-updates:
-# Maintain Python dependencies in requirements.txt
-- package-ecosystem: "pip"
-  directory: "/"
-  schedule:
-    interval: "daily"
-  open-pull-requests-limit: 10
-  groups:
-    dependencies:
-      patterns:
-      - "*"
 
-# Maintain GitHub Actions workflows
-- package-ecosystem: "github-actions"
-  directory: "/"
-  schedule:
-    interval: "weekly"
+multi-ecosystem-groups:
+  dependencies:
+    schedule:
+      interval: "cron"
+      cronjob: "47 2 * * *"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    patterns: ["*"]
+    multi-ecosystem-group: "dependencies"
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    patterns: ["bbernhard/signal-cli-rest-api"]
+    multi-ecosystem-group: "dependencies"
+    allow:
+      - dependency-name: "bbernhard/signal-cli-rest-api"

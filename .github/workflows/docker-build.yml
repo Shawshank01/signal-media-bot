@@ -9,15 +9,49 @@ on:
     - "requirements.txt"
     - "Dockerfile"
     - ".dockerignore"
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
+  check-media-updates:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rebuild: ${{ steps.check.outputs.rebuild }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+
+    - name: Set up ARM64 emulation
+      uses: docker/setup-qemu-action@v4
+      with:
+        platforms: arm64
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v4
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Compare FFmpeg and yt-dlp versions
+      id: check
+      env:
+        PUBLISHED_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/signal-media-bot:latest
+      run: python3 .github/scripts/check-media-updates.py
+
   build:
+    needs: check-media-updates
+    if: >-
+      ${{ !cancelled() && (github.event_name != 'schedule' ||
+          (needs.check-media-updates.result == 'success' &&
+           needs.check-media-updates.outputs.rebuild == 'true')) }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,6 +88,8 @@ jobs:
         context: .
         file: ./Dockerfile
         platforms: ${{ matrix.platform }}
+        pull: true
+        no-cache: ${{ github.event_name == 'schedule' }}
         labels: ${{ steps.meta.outputs.labels }}
         outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/signal-media-bot,push-by-digest=true,name-canonical=true,push=true
 

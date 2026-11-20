@@ -1,6 +1,6 @@
 services:
   signal-api:
-    image: bbernhard/signal-cli-rest-api:latest
+    image: bbernhard/signal-cli-rest-api:0.101
     container_name: signal-api
     restart: unless-stopped
     environment:

@@ -168,6 +168,10 @@ docker compose pull signal-bot
 docker compose up -d signal-bot
 ```
 
+GitHub Actions checks daily for newer FFmpeg and yt-dlp versions and rebuilds the bot image when either has an update. Dependabot also opens pull requests for dependency updates.
+
+To update the pinned Signal API version, first bring your local `docker-compose.yml` up to date with this repository, then run `docker compose pull signal-api` and `docker compose up -d signal-api`.
+
 ## YouTube Cookies (Optional)
 
 YouTube frequently blocks requests from VPS/datacenter IPs. To resolve this, you can provide an exported browser `cookies.txt`:
