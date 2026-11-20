@@ -157,6 +157,8 @@ Optional command arguments can force audio-only output, cap video resolution, se
 
 Video downloads are selected as the highest available video and audio combination estimated to fit the size limit. If the finished file is too large, the bot retries other combinations in preference order, including lower resolutions if necessary. If no video format fits, it explains how to request audio only. Retries take additional time and are subject to the download timeout.
 
+The bot processes one message at a time and queues up to eight more. A full queue returns HTTP 503 to the Signal API. If your request doesn't get a reply, send it again after the bot finishes earlier requests.
+
 ## Update
 
 ```sh

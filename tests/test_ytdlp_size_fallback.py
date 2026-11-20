@@ -1,4 +1,3 @@
-import asyncio
 import os
 import tempfile
 import unittest
@@ -45,10 +44,11 @@ class SizeFallbackTests(unittest.TestCase):
 
         config = bot.Settings(bot_phone_number="+15555550100", cookies_file=None)
         with tempfile.TemporaryDirectory() as directory, patch.object(bot.yt_dlp, "YoutubeDL", FakeYoutubeDL):
-            result = asyncio.run(bot.download_with_ytdlp("https://example.com/video", Path(directory), config))
+            destination = Path(directory)
+            title = bot._download_ytdlp("https://example.com/video", destination, config, bot.DownloadOptions())
             self.assertEqual(["398+140", "397+140"], attempts)
-            self.assertLessEqual(result.media[0].path.stat().st_size, config.max_file_size)
-            self.assertEqual("Test video", result.text)
+            self.assertLessEqual((destination / "video.mp4").stat().st_size, config.max_file_size)
+            self.assertEqual("Test video", title)
 
     def run_scenario(self, formats, sizes, options=None):
         attempts = []
@@ -78,8 +78,10 @@ class SizeFallbackTests(unittest.TestCase):
         config = bot.Settings(bot_phone_number="+15555550100", cookies_file=None)
         with tempfile.TemporaryDirectory() as directory, patch.object(bot.yt_dlp, "YoutubeDL", FakeYoutubeDL):
             try:
-                result = asyncio.run(bot.download_with_ytdlp("https://example.com/video", Path(directory), config, options))
-                return attempts, result.media[0].path.stat().st_size, None
+                destination = Path(directory)
+                bot._download_ytdlp("https://example.com/video", destination, config, options or bot.DownloadOptions())
+                suffix = "m4a" if options and options.audio_only else "mp4"
+                return attempts, (destination / f"video.{suffix}").stat().st_size, None
             except bot.DownloadError as exc:
                 return attempts, None, str(exc)
 

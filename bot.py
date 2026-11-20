@@ -4,12 +4,15 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import shutil
+import signal
+import sys
 import tempfile
-from collections.abc import AsyncGenerator, Callable, Mapping
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import asynccontextmanager, suppress
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -158,9 +161,6 @@ class Settings(BaseSettings):
         return tuple(
             x.strip().lower() for x in self.trigger_prefixes.split(",") if x.strip()
         )
-
-
-settings = Settings()
 
 
 @dataclass(frozen=True)
@@ -481,10 +481,6 @@ def format_caption(text: str, url: str) -> str:
 
 
 class DownloadError(Exception):
-    pass
-
-
-class DeferredCleanupTimeoutError(DownloadError):
     pass
 
 
@@ -998,134 +994,136 @@ def format_ytdlp_error(exc: Exception | None, url: str, config: Settings) -> str
     return "This YouTube video is unavailable or could not be extracted."
 
 
+def _downloaded_files(destination: Path) -> list[Path]:
+    return [
+        path
+        for path in destination.iterdir()
+        if path.is_file() and path.name != ".cookies.txt"
+    ]
+
+
+def _download_ytdlp(
+    url: str, destination: Path, config: Settings, options: DownloadOptions
+) -> str:
+    ytdlp_options: dict[str, Any] = {
+        "outtmpl": str(destination / "%(id)s.%(ext)s"),
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+        "socket_timeout": config.download_timeout_seconds,
+        "js_runtimes": {"deno": {}},
+        "remote_components": ["ejs:github"],
+    }
+    temporary_cookie_file: Path | None = None
+    if config.cookies_file and has_valid_cookies(config):
+        temporary_cookie_file = destination / ".cookies.txt"
+        shutil.copyfile(config.cookies_file, temporary_cookie_file)
+        ytdlp_options["cookiefile"] = str(temporary_cookie_file)
+    title = ""
+    try:
+        with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
+            info = extractor.extract_info(url, download=False)
+        if not isinstance(info, dict):
+            raise DownloadError(format_ytdlp_error(None, url, config))
+        title = str(info.get("title") or "").strip()
+
+        raw_formats = info.get("formats") or []
+        audio_formats = [
+            f
+            for f in raw_formats
+            if isinstance(f, dict)
+            and f.get("vcodec") in (None, "none")
+            and f.get("acodec") not in (None, "none")
+        ]
+        distinct_langs = sorted(
+            {
+                str(f.get("language"))
+                for f in audio_formats
+                if f.get("language") and str(f.get("language")) != "None"
+            }
+        )
+        if len(distinct_langs) > 1:
+            chosen_lang = options.audio_lang or next(
+                (
+                    str(f.get("language"))
+                    for f in audio_formats
+                    if "(default)" in str(f.get("format_note") or "")
+                    or _metadata_int(f.get("language_preference")) > 0
+                ),
+                distinct_langs[0],
+            )
+            other_langs = [l for l in distinct_langs if l != chosen_lang]
+            if other_langs:
+                title += f"\n\n[Audio: {chosen_lang} | Other tracks: {', '.join(other_langs)} (use lang:<code>)]"
+            else:
+                title += f"\n\n[Audio: {chosen_lang}]"
+
+        excluded: set[str] = set()
+        size_error: DownloadError | None = None
+        while True:
+            try:
+                format_spec = select_ytdlp_format(info, config, options, excluded)
+            except DownloadError:
+                if size_error is not None:
+                    raise size_error
+                raise
+            ytdlp_options["format"] = format_spec
+            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
+                downloader.download([url])
+            paths = _downloaded_files(destination)
+            if not paths:
+                raise DownloadError("No downloadable media was found at that link.")
+            oversized = next(
+                (
+                    path
+                    for path in paths
+                    if path.stat().st_size > config.max_file_size
+                ),
+                None,
+            )
+            if oversized is None:
+                return title
+            is_audio = (
+                options.audio_only
+                or oversized.suffix.lower() in AUDIO_CONTENT_TYPES
+            )
+            if is_audio:
+                size_error = DownloadError(
+                    f"This audio is too large to send within {config.max_file_size_mb} MB."
+                )
+            else:
+                size_error = DownloadError(
+                    f"This media is too large to send within {config.max_file_size_mb} MB. "
+                    "Try `/dl <url> audio` to download only its audio."
+                )
+            log.info(
+                "Downloaded format %s exceeds the size limit; trying another format",
+                format_spec,
+            )
+            excluded.add(format_spec)
+            for path in paths:
+                path.unlink()
+    except (YtDlpDownloadError, OSError) as exc:
+        raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
+    finally:
+        if temporary_cookie_file:
+            temporary_cookie_file.unlink(missing_ok=True)
+
+
 async def download_with_ytdlp(
     url: str,
     destination: Path,
     config: Settings,
     options: DownloadOptions | None = None,
 ) -> DownloadResult:
-    if options is None:
-        options = DownloadOptions()
-
-    def run() -> tuple[list[Path], str]:
-        ytdlp_options: dict[str, Any] = {
-            "outtmpl": str(destination / "%(id)s.%(ext)s"),
-            "merge_output_format": "mp4",
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "restrictfilenames": True,
-            "socket_timeout": config.download_timeout_seconds,
-            "js_runtimes": {"deno": {}},
-            "remote_components": ["ejs:github"],
-        }
-        temporary_cookie_file: Path | None = None
-        if config.cookies_file and has_valid_cookies(config):
-            temporary_cookie_file = destination / ".cookies.txt"
-            shutil.copyfile(config.cookies_file, temporary_cookie_file)
-            ytdlp_options["cookiefile"] = str(temporary_cookie_file)
-        title = ""
-        try:
-            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
-                info = extractor.extract_info(url, download=False)
-            if not isinstance(info, dict):
-                raise DownloadError(format_ytdlp_error(None, url, config))
-            title = str(info.get("title") or "").strip()
-
-            raw_formats = info.get("formats") or []
-            audio_formats = [
-                f
-                for f in raw_formats
-                if isinstance(f, dict)
-                and f.get("vcodec") in (None, "none")
-                and f.get("acodec") not in (None, "none")
-            ]
-            distinct_langs = sorted(
-                {
-                    str(f.get("language"))
-                    for f in audio_formats
-                    if f.get("language") and str(f.get("language")) != "None"
-                }
-            )
-            if len(distinct_langs) > 1:
-                chosen_lang = options.audio_lang or next(
-                    (
-                        str(f.get("language"))
-                        for f in audio_formats
-                        if "(default)" in str(f.get("format_note") or "")
-                        or _metadata_int(f.get("language_preference")) > 0
-                    ),
-                    distinct_langs[0],
-                )
-                other_langs = [l for l in distinct_langs if l != chosen_lang]
-                if other_langs:
-                    title += f"\n\n[Audio: {chosen_lang} | Other tracks: {', '.join(other_langs)} (use lang:<code>)]"
-                else:
-                    title += f"\n\n[Audio: {chosen_lang}]"
-
-            excluded: set[str] = set()
-            size_error: DownloadError | None = None
-            while True:
-                try:
-                    format_spec = select_ytdlp_format(info, config, options, excluded)
-                except DownloadError:
-                    if size_error is not None:
-                        raise size_error
-                    raise
-                ytdlp_options["format"] = format_spec
-                with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as downloader:
-                    downloader.download([url])
-                paths = [
-                    path
-                    for path in destination.iterdir()
-                    if path.is_file() and path.name != ".cookies.txt"
-                ]
-                if not paths:
-                    raise DownloadError("No downloadable media was found at that link.")
-                oversized = next(
-                    (
-                        path
-                        for path in paths
-                        if path.stat().st_size > config.max_file_size
-                    ),
-                    None,
-                )
-                if oversized is None:
-                    return paths, title
-                is_audio = (
-                    options.audio_only
-                    or oversized.suffix.lower() in AUDIO_CONTENT_TYPES
-                )
-                if is_audio:
-                    size_error = DownloadError(
-                        f"This audio is too large to send within {config.max_file_size_mb} MB."
-                    )
-                else:
-                    size_error = DownloadError(
-                        f"This media is too large to send within {config.max_file_size_mb} MB. "
-                        "Try `/dl <url> audio` to download only its audio."
-                    )
-                log.info(
-                    "Downloaded format %s exceeds the size limit; trying another format",
-                    format_spec,
-                )
-                excluded.add(format_spec)
-                for path in paths:
-                    path.unlink()
-        except (YtDlpDownloadError, OSError) as exc:
-            raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
-        finally:
-            if temporary_cookie_file:
-                temporary_cookie_file.unlink(missing_ok=True)
-
+    options = options or DownloadOptions()
     try:
-        paths, title = await _run_thread_with_timeout(
-            run,
-            config.download_timeout_seconds,
-            on_timeout=lambda: shutil.rmtree(destination, ignore_errors=True),
-        )
+        title = await _run_ytdlp_worker(url, destination, config, options)
     except TimeoutError as exc:
-        raise DeferredCleanupTimeoutError("The download timed out.") from exc
+        raise DownloadError("The download timed out.") from exc
+    paths = _downloaded_files(destination)
     if not paths:
         raise DownloadError("No downloadable media was found at that link.")
     for path in paths:
@@ -1195,104 +1193,154 @@ async def encode_attachment(media: DownloadedMedia) -> str:
     return f"data:{media.content_type};filename={media.path.name};base64,{encoded}"
 
 
-async def _run_thread_with_timeout(
-    func: Callable[[], Any],
-    timeout: int,
-    on_timeout: Callable[[], None] | None = None,
-) -> Any:
-    task = asyncio.create_task(asyncio.to_thread(func))
+def _inspect_ytdlp(url: str, destination: Path, config: Settings) -> str:
+    ytdlp_options: dict[str, Any] = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": config.download_timeout_seconds,
+        "js_runtimes": {"deno": {}},
+        "remote_components": ["ejs:github"],
+    }
+    if config.cookies_file and has_valid_cookies(config):
+        temporary_cookie_file = destination / ".cookies.txt"
+        shutil.copyfile(config.cookies_file, temporary_cookie_file)
+        ytdlp_options["cookiefile"] = str(temporary_cookie_file)
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout)
-    except TimeoutError:
+        with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
+            info = extractor.extract_info(url, download=False)
+    except (YtDlpDownloadError, OSError) as exc:
+        raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
 
-        def consume_result(completed_task: asyncio.Task[Any]) -> None:
-            try:
-                completed_task.exception()
-            except asyncio.CancelledError:
-                pass
-            if on_timeout:
-                on_timeout()
+    if not isinstance(info, dict):
+        raise DownloadError(format_ytdlp_error(None, url, config))
 
-        task.add_done_callback(consume_result)
-        raise
+    title = str(info.get("title") or "Media").strip()
+    raw_formats = info.get("formats") or []
+    formats = [f for f in raw_formats if isinstance(f, dict)]
+
+    heights = sorted(
+        {
+            _metadata_int(f.get("height"))
+            for f in formats
+            if f.get("vcodec") not in (None, "none") and f.get("height")
+        },
+        reverse=True,
+    )
+
+    audio_formats = [
+        f
+        for f in formats
+        if f.get("vcodec") in (None, "none")
+        and f.get("acodec") not in (None, "none")
+    ]
+    tracks: dict[str, str] = {}
+    for af in audio_formats:
+        lang = str(af.get("language") or "")
+        note = str(af.get("format_note") or "")
+        fid = str(af.get("format_id") or "")
+        if not lang and not note:
+            continue
+        key = lang or fid
+        if key not in tracks:
+            desc = note if note else f"ID {fid}"
+            tracks[key] = desc
+
+    lines = [f"🎬 {title}"]
+    if heights:
+        lines.append(f"\nResolutions: {', '.join(f'{h}p' for h in heights)}")
+    if tracks:
+        lines.append("\nAvailable audio tracks:")
+        for key, desc in tracks.items():
+            lines.append(f"• {key}: {desc}")
+        first_lang = next(iter(tracks.keys()))
+        lines.append("\nTo download with specific audio:")
+        lines.append(f"/dl <url> lang:{first_lang}")
+        lines.append(f"/dl <url> audio lang:{first_lang}")
+    else:
+        lines.append("\nNo separate audio tracks detected.")
+    return "\n".join(lines)
 
 
 async def extract_media_info(url: str, config: Settings) -> str:
-    def run() -> str:
-        temp_dir = Path(tempfile.mkdtemp(prefix="ytdlp-info-"))
-        ytdlp_options: dict[str, Any] = {
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": config.download_timeout_seconds,
-            "js_runtimes": {"deno": {}},
-            "remote_components": ["ejs:github"],
-        }
-        if config.cookies_file and has_valid_cookies(config):
-            temporary_cookie_file = temp_dir / ".cookies.txt"
-            shutil.copyfile(config.cookies_file, temporary_cookie_file)
-            ytdlp_options["cookiefile"] = str(temporary_cookie_file)
+    with tempfile.TemporaryDirectory(prefix="ytdlp-info-") as directory:
         try:
-            with yt_dlp.YoutubeDL(cast(Any, ytdlp_options)) as extractor:
-                info = extractor.extract_info(url, download=False)
-        except (YtDlpDownloadError, OSError) as exc:
-            raise DownloadError(format_ytdlp_error(exc, url, config)) from exc
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            return await _run_ytdlp_worker(url, Path(directory), config)
+        except TimeoutError as exc:
+            raise DownloadError("Media inspection timed out.") from exc
 
-        if not isinstance(info, dict):
-            raise DownloadError(format_ytdlp_error(None, url, config))
 
-        title = str(info.get("title") or "Media").strip()
-        raw_formats = info.get("formats") or []
-        formats = [f for f in raw_formats if isinstance(f, dict)]
-
-        heights = sorted(
-            {
-                _metadata_int(f.get("height"))
-                for f in formats
-                if f.get("vcodec") not in (None, "none") and f.get("height")
-            },
-            reverse=True,
+async def _run_ytdlp_worker(
+    url: str,
+    destination: Path,
+    config: Settings,
+    options: DownloadOptions | None = None,
+) -> str:
+    request = {
+        "url": url,
+        "destination": str(destination),
+        "config": config.model_dump(mode="json"),
+        "options": asdict(options) if options is not None else None,
+    }
+    with tempfile.TemporaryFile() as request_file, tempfile.TemporaryFile() as result_file:
+        request_file.write(json.dumps(request).encode("utf-8"))
+        request_file.seek(0)
+        result_fd = result_file.fileno()
+        launch = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--yt-dlp-worker",
+                str(result_fd),
+                stdin=request_file,
+                pass_fds=(result_fd,),
+                start_new_session=True,
+            )
         )
+        try:
+            async with asyncio.timeout(config.download_timeout_seconds):
+                process = await asyncio.shield(launch)
+                await process.wait()
+        except (TimeoutError, asyncio.CancelledError):
+            # Finish launching before killing the group, including FFmpeg and Deno.
+            try:
+                process = await launch
+            except OSError:
+                pass
+            else:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                await process.wait()
+            raise
 
-        audio_formats = [
-            f
-            for f in formats
-            if f.get("vcodec") in (None, "none")
-            and f.get("acodec") not in (None, "none")
-        ]
-        tracks: dict[str, str] = {}
-        for af in audio_formats:
-            lang = str(af.get("language") or "")
-            note = str(af.get("format_note") or "")
-            fid = str(af.get("format_id") or "")
-            if not lang and not note:
-                continue
-            key = lang or fid
-            if key not in tracks:
-                desc = note if note else f"ID {fid}"
-                tracks[key] = desc
+        if process.returncode != 0:
+            log.error("yt-dlp worker exited with status %s", process.returncode)
+            raise DownloadError("Media processing failed.")
+        result_file.seek(0)
+        result = json.load(result_file)
 
-        lines = [f"🎬 {title}"]
-        if heights:
-            lines.append(f"\nResolutions: {', '.join(f'{h}p' for h in heights)}")
-        if tracks:
-            lines.append("\nAvailable audio tracks:")
-            for key, desc in tracks.items():
-                lines.append(f"• {key}: {desc}")
-            first_lang = next(iter(tracks.keys()))
-            lines.append("\nTo download with specific audio:")
-            lines.append(f"/dl <url> lang:{first_lang}")
-            lines.append(f"/dl <url> audio lang:{first_lang}")
-        else:
-            lines.append("\nNo separate audio tracks detected.")
-        return "\n".join(lines)
+    if "error" in result:
+        raise DownloadError(result["error"])
+    return result["text"]
 
+
+def _ytdlp_worker(result_fd: int) -> None:
+    request = json.load(sys.stdin)
+    config = Settings.model_validate(request["config"])
+    url = request["url"]
+    destination = Path(request["destination"])
+    options = request["options"]
     try:
-        return await _run_thread_with_timeout(run, config.download_timeout_seconds)
-    except TimeoutError as exc:
-        raise DownloadError("Media inspection timed out.") from exc
+        if options is None:
+            text = _inspect_ytdlp(url, destination, config)
+        else:
+            text = _download_ytdlp(url, destination, config, DownloadOptions(**options))
+    except DownloadError as exc:
+        result = {"error": str(exc)}
+    else:
+        result = {"text": text}
+    with os.fdopen(result_fd, "w", encoding="utf-8") as output:
+        json.dump(result, output)
 
 
 async def process_message(
@@ -1334,24 +1382,24 @@ async def process_message(
             continue
 
         workdir: Path | None = None
-        cleanup_deferred = False
         try:
             workdir = Path(
                 tempfile.mkdtemp(prefix="signal-media-", dir=config.shared_media_dir)
             )
             await signal.send("Downloading media...", message)
             if is_x_url(url):
-                result = await fx.download(url, workdir)
+                async with asyncio.timeout(config.download_timeout_seconds):
+                    result = await fx.download(url, workdir)
             elif is_bsky_url(url):
-                result = await bsky.download(url, workdir)
+                async with asyncio.timeout(config.download_timeout_seconds):
+                    result = await bsky.download(url, workdir)
             else:
                 result = await download_with_ytdlp(url, workdir, config, opts)
             caption = format_caption(result.text, url)
             await signal.send(caption, message, result.media)
-        except DeferredCleanupTimeoutError as exc:
-            cleanup_deferred = True
-            log.info("Download timed out for %s: %s", url, exc)
-            await send_error(signal, str(exc), message)
+        except TimeoutError:
+            log.info("Download timed out for %s", url)
+            await send_error(signal, "The download timed out.", message)
         except DownloadError as exc:
             log.info("Download failed for %s: %s", url, exc)
             await send_error(signal, str(exc), message)
@@ -1359,7 +1407,7 @@ async def process_message(
             log.exception("Processing failed for %s", url)
             await send_error(signal, "I could not send that media right now.", message)
         finally:
-            if workdir is not None and not cleanup_deferred:
+            if workdir is not None:
                 shutil.rmtree(workdir, ignore_errors=True)
 
 
@@ -1370,8 +1418,22 @@ async def send_error(signal: SignalClient, text: str, message: IncomingMessage) 
         log.exception("Could not send error response")
 
 
+async def _process_queue(
+    messages: asyncio.Queue[IncomingMessage], config: Settings, client: httpx.AsyncClient
+) -> None:
+    while True:
+        message = await messages.get()
+        try:
+            await process_message(message, config, client)
+        except Exception:
+            log.exception("Failed to process a Signal message")
+        finally:
+            messages.task_done()
+            del message
+
+
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     settings.shared_media_dir.mkdir(parents=True, exist_ok=True)
     if settings.cookies_file and settings.cookies_file.is_dir():
         log.warning(
@@ -1383,10 +1445,23 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     async with httpx.AsyncClient(
         timeout=timeout, headers={"User-Agent": settings.user_agent}
     ) as client:
-        app.state.http_client = client
-        yield
+        messages: asyncio.Queue[IncomingMessage] = asyncio.Queue(maxsize=8)
+        app.state.messages = messages
+        worker = asyncio.create_task(_process_queue(messages, settings, client))
+        try:
+            yield
+        finally:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+            del app.state.messages
 
 
+if __name__ == "__main__" and sys.argv[1:2] == ["--yt-dlp-worker"]:
+    _ytdlp_worker(int(sys.argv[2]))
+    raise SystemExit
+
+settings = Settings()
 app = FastAPI(title="Signal Media Downloader", lifespan=lifespan)
 
 
@@ -1406,7 +1481,12 @@ async def webhook(request: Request) -> dict[str, str]:
     message = parse_message(payload)
     if not message or message.sender in {settings.bot_phone_number, settings.bot_uuid}:
         return {"status": "ignored"}
-    asyncio.create_task(
-        process_message(message, settings, request.app.state.http_client)
-    )
+    if not message_urls(message, settings) and not is_help_request(message, settings):
+        return {"status": "ignored"}
+    try:
+        request.app.state.messages.put_nowait(message)
+    except asyncio.QueueFull as exc:
+        raise HTTPException(
+            status_code=503, detail="The bot is busy. Try again later."
+        ) from exc
     return {"status": "accepted"}
